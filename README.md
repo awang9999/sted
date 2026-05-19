@@ -1,2 +1,2 @@
-# ted
-A tiny terminal editor implemented in Rust
+# sted
+A Simple Terminal EDitor implemented in Rust
