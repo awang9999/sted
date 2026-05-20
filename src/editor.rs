@@ -1,5 +1,12 @@
-use crate::terminal::Terminal;
-use crossterm::event::{Event, Event::Key, KeyCode::Char, KeyEvent, KeyModifiers, read};
+use crate::terminal::{Terminal, TerminalCoordinate};
+use crossterm::{
+    ExecutableCommand,
+    event::{
+        Event::{self, Key},
+        KeyCode::Char,
+        KeyEvent, KeyModifiers, read,
+    },
+};
 
 pub struct Editor {
     should_quit: bool,
@@ -41,21 +48,25 @@ impl Editor {
         }
     }
     fn refresh_screen(&self) -> Result<(), std::io::Error> {
+        Terminal::hide_cursor()?;
         if self.should_quit {
             Terminal::clear_screen()?;
             print!("Goodbye.\r\n");
         } else {
+            Terminal::move_cursor_to(TerminalCoordinate { x: 0, y: 0 })?;
             Self::draw_rows()?;
-            Terminal::move_cursor_to(0, 0)?;
+            Terminal::show_cursor()?;
+            Terminal::execute()?;
         }
         Ok(())
     }
     fn draw_rows() -> Result<(), std::io::Error> {
-        let height = Terminal::size()?.1;
+        let height = Terminal::size()?.height;
         for current_row in 0..height {
-            print!("~");
+            Terminal::clear_row(current_row)?;
+            Terminal::print("~")?;
             if current_row + 1 < height {
-                print!("\r\n");
+                Terminal::print("\r\n")?;
             }
         }
         Ok(())
