@@ -1,6 +1,5 @@
-use crate::terminal::{Terminal, TerminalCoordinate};
+use crate::terminal::{Terminal, Position};
 use crossterm::{
-    ExecutableCommand,
     event::{
         Event::{self, Key},
         KeyCode::Char,
@@ -53,8 +52,9 @@ impl Editor {
             Terminal::clear_screen()?;
             print!("Goodbye.\r\n");
         } else {
-            Terminal::move_cursor_to(TerminalCoordinate { x: 0, y: 0 })?;
+            Terminal::move_cursor_to(Position { x: 0, y: 0 })?;
             Self::draw_rows()?;
+            Self::draw_welcome()?;
             Terminal::show_cursor()?;
             Terminal::execute()?;
         }
@@ -69,6 +69,35 @@ impl Editor {
                 Terminal::print("\r\n")?;
             }
         }
+        Ok(())
+    }
+    fn draw_welcome() -> Result<(), std::io::Error> {
+        let size = Terminal::size()?;
+        let welcome = "Welcome to STED!";
+        let sted = "The (S)imple (T)erminal (Ed)itor";
+        let version = "Version 1.0.0";
+
+        let welcome_row = size.height / 3;
+        let welcome_col = (size.width - (welcome.len() as u16)) / 2;
+        let sted_row = welcome_row + 1;
+        let sted_col = (size.width - (sted.len() as u16)) / 2;
+        let version_row = welcome_row + 2;
+        let version_col = (size.width - (version.len() as u16)) / 2;
+
+        Terminal::print_at(
+            Position{x: 0, y: welcome_row},
+            &("~".to_string() + &" ".repeat((welcome_col - 1).into()) + welcome))?;
+
+        Terminal::print_at(
+            Position{x: 0, y: sted_row},
+            &("~".to_string() + &" ".repeat((sted_col - 1).into()) + sted))?;
+
+        Terminal::print_at(
+            Position{x: 0, y: version_row},
+            &("~".to_string() + &" ".repeat((version_col - 1).into()) + version))?;
+
+        Terminal::move_cursor_to(Position{x: 0, y: 0})?;
+
         Ok(())
     }
 }
