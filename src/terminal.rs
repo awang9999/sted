@@ -1,26 +1,31 @@
 use crossterm::cursor::{Hide, MoveTo, MoveToRow, Show};
-use crossterm::{queue, Command};
 use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
-use std::io::{Write, stdout, Error};
+use crossterm::{Command, queue};
+use std::io::{Error, Write, stdout};
 
 #[derive(Copy, Clone)]
 pub struct Size {
-    pub height: u16,
-    pub width: u16,
+    pub height: usize,
+    pub width: usize,
 }
 
 pub struct Position {
     // Origin is top left corner. Positive x is right, positive y is down
-    pub x: u16,
-    pub y: u16,
+    pub x: usize,
+    pub y: usize,
 }
 
+/// Represents the Terminal.
+/// Edge Case for platforms where `usize` < `u16`:
+/// Regardless of the actual size of the Terminal, this representation
+/// only spans over at most `usize::MAX` or `u16::size` rows/columns, whichever is smaller.
+/// Each size returned truncates to min(`usize::MAX`, `u16::MAX`)
+/// And should you attempt to set the cursor out of these bounds, it will also be truncated.
 #[derive(Copy, Clone)]
 pub struct Terminal;
 
 impl Terminal {
-
     pub fn terminate() -> Result<(), Error> {
         disable_raw_mode()?;
         Ok(())
@@ -28,7 +33,7 @@ impl Terminal {
     pub fn initialize() -> Result<(), Error> {
         enable_raw_mode()?;
         Self::clear_screen()?;
-        Self::move_cursor_to(Position { x: 0, y: 0 })?;
+        Self::move_cursor_to(0, 0)?;
         Self::execute()?;
         Ok(())
     }
@@ -41,15 +46,26 @@ impl Terminal {
         Self::queue_command(Clear(ClearType::All))?;
         Ok(())
     }
-    pub fn move_cursor_to(c: Position) -> Result<(), Error> {
-        Self::queue_command(MoveTo(c.x, c.y))?;
+    pub fn move_cursor_to(x: usize, y: usize) -> Result<(), Error> {
+        Self::move_cursor_to_pos(Position { x: x, y: y })?;
         Ok(())
     }
+    /// Moves the cursor to the given Position.
+    /// # Arguments
+    /// * `Position` - the  `Position`to move the cursor to. Will be truncated to `u16::MAX` if bigger.
+    pub fn move_cursor_to_pos(c: Position) -> Result<(), Error> {
+        Self::queue_command(MoveTo(c.x as u16, c.y as u16))?;
+        Ok(())
+    }
+
+    /// Returns the current size of this Terminal.
+    /// Edge Case for systems with `usize` < `u16`:
+    /// * A `Size` representing the terminal size. Any coordinate `z` truncated to `usize` if `usize` < `z` < `u16`
     pub fn size() -> Result<Size, Error> {
-        let (w, h) = size()?;
+        let (w_u16, h_u16) = size()?;
         Ok(Size {
-            width: w,
-            height: h,
+            width: w_u16 as usize,
+            height: h_u16 as usize,
         })
     }
     pub fn hide_cursor() -> Result<(), Error> {
@@ -60,8 +76,8 @@ impl Terminal {
         Self::queue_command(Show)?;
         Ok(())
     }
-    pub fn clear_row(row: u16) -> Result<(), Error> {
-        Self::queue_command(MoveToRow(row))?;
+    pub fn clear_row(row: usize) -> Result<(), Error> {
+        Self::queue_command(MoveToRow(row as u16))?;
         Self::queue_command(Clear(ClearType::CurrentLine))?;
         Ok(())
     }
@@ -71,8 +87,13 @@ impl Terminal {
         Ok(())
     }
 
-    pub fn print_at(pos: Position, string: &str) -> Result<(), Error> {
-        Self::move_cursor_to(pos)?;
+    pub fn print_at(x: usize, y: usize, string: &str) -> Result<(), Error> {
+        Self::print_at_pos(Position { x, y }, string)?;
+        Ok(())
+    }
+
+    pub fn print_at_pos(pos: Position, string: &str) -> Result<(), Error> {
+        Self::move_cursor_to_pos(pos)?;
         Self::print(string)?;
         Ok(())
     }
