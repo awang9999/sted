@@ -1,17 +1,23 @@
 use crate::terminal::{Position, Terminal};
+use core::cmp::{max, min};
 use crossterm::event::{
     Event::{self, Key},
+    KeyCode,
     KeyCode::Char,
     KeyEvent, KeyModifiers, read,
 };
 
 pub struct Editor {
     should_quit: bool,
+    position: Position,
 }
 
 impl Editor {
     pub const fn default() -> Self {
-        Self { should_quit: false }
+        Self {
+            should_quit: false,
+            position: Position { x: 0, y: 0 },
+        }
     }
     pub fn run(&mut self) {
         Terminal::initialize().unwrap();
@@ -27,32 +33,46 @@ impl Editor {
                 break;
             }
             let event = read()?;
-            self.evaluate_event(&event);
+            self.evaluate_event(&event)?;
         }
         Ok(())
     }
-    fn evaluate_event(&mut self, event: &Event) {
+    fn evaluate_event(&mut self, event: &Event) -> Result<(), std::io::Error> {
         if let Key(KeyEvent {
             code, modifiers, ..
         }) = event
         {
+            let term_size = Terminal::size()?;
+
             match code {
+                KeyCode::Up => self.position.y = max(0, self.position.y.saturating_sub(1)),
+                KeyCode::Down => {
+                    self.position.y = min(term_size.height, self.position.y.saturating_add(1))
+                }
+                KeyCode::Left => self.position.x = max(0, self.position.x.saturating_sub(1)),
+                KeyCode::Right => {
+                    self.position.x = min(term_size.width, self.position.x.saturating_add(1))
+                }
+                KeyCode::PageUp => self.position.y = 0,
+                KeyCode::PageDown => self.position.y = term_size.height,
+                KeyCode::Home => self.position.x = 0,
+                KeyCode::End => self.position.x = term_size.width,
                 Char('q') if *modifiers == KeyModifiers::CONTROL => {
                     self.should_quit = true;
                 }
                 _ => (),
             }
         }
+        Ok(())
     }
     fn refresh_screen(&self) -> Result<(), std::io::Error> {
         Terminal::hide_cursor()?;
         if self.should_quit {
             Terminal::clear_screen()?;
-            print!("Goodbye.\r\n");
         } else {
-            Terminal::move_cursor_to(0, 0)?;
             Self::draw_rows()?;
             Self::draw_welcome()?;
+            Terminal::move_cursor_to_pos(&self.position)?;
             Terminal::show_cursor()?;
             Terminal::execute()?;
         }
@@ -62,7 +82,7 @@ impl Editor {
         let height = Terminal::size()?.height;
         for current_row in 0..height {
             Terminal::clear_row(current_row)?;
-            Terminal::print("~")?;
+            Terminal::print_at(0, current_row, "~")?;
             if current_row.saturating_add(1) < height {
                 Terminal::print("\r\n")?;
             }
@@ -82,30 +102,33 @@ impl Editor {
         // it's allowed to be a bit to the left or right.
         #[allow(clippy::integer_division)]
         let welcome_col = width.saturating_sub(welcome.len()) / 2;
-        let sted_row = welcome_row + 1;
+        let sted_row = welcome_row.saturating_add(1);
+        #[allow(clippy::integer_division)]
         let sted_col = width.saturating_sub(sted.len()) / 2;
-        let version_row = welcome_row + 2;
+        let version_row = welcome_row.saturating_add(2);
+        #[allow(clippy::integer_division)]
         let version_col = width.saturating_sub(version.len()) / 2;
 
         Terminal::print_at(
             0,
             welcome_row,
-            &("~".to_string() + &" ".repeat((welcome_col - 1).into()) + welcome),
+            &("~".to_string() + &" ".repeat(welcome_col.saturating_sub(1)) + welcome),
         )?;
 
         Terminal::print_at(
             0,
             sted_row,
-            &("~".to_string() + &" ".repeat((sted_col - 1).into()) + sted),
+            &("~".to_string() + &" ".repeat(sted_col.saturating_sub(1)) + sted),
         )?;
 
         Terminal::print_at(
             0,
             version_row,
-            &("~".to_string() + &" ".repeat((version_col - 1).into()) + version),
+            &("~".to_string() + &" ".repeat(version_col.saturating_sub(1)) + version),
         )?;
 
-        Terminal::move_cursor_to_pos(Position { x: 0, y: 0 })?;
+        let origin = Position { x: 0, y: 0 };
+        Terminal::move_cursor_to_pos(&origin)?;
 
         Ok(())
     }

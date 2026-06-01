@@ -47,13 +47,15 @@ impl Terminal {
         Ok(())
     }
     pub fn move_cursor_to(x: usize, y: usize) -> Result<(), Error> {
-        Self::move_cursor_to_pos(Position { x: x, y: y })?;
+        let pos = Position { x, y };
+        Self::move_cursor_to_pos(&pos)?;
         Ok(())
     }
     /// Moves the cursor to the given Position.
     /// # Arguments
     /// * `Position` - the  `Position`to move the cursor to. Will be truncated to `u16::MAX` if bigger.
-    pub fn move_cursor_to_pos(c: Position) -> Result<(), Error> {
+    pub fn move_cursor_to_pos(c: &Position) -> Result<(), Error> {
+        #[allow(clippy::cast_possible_truncation)]
         Self::queue_command(MoveTo(c.x as u16, c.y as u16))?;
         Ok(())
     }
@@ -63,6 +65,7 @@ impl Terminal {
     /// * A `Size` representing the terminal size. Any coordinate `z` truncated to `usize` if `usize` < `z` < `u16`
     pub fn size() -> Result<Size, Error> {
         let (w_u16, h_u16) = size()?;
+        #[allow(clippy::cast_possible_truncation)]
         Ok(Size {
             width: w_u16 as usize,
             height: h_u16 as usize,
@@ -88,11 +91,12 @@ impl Terminal {
     }
 
     pub fn print_at(x: usize, y: usize, string: &str) -> Result<(), Error> {
-        Self::print_at_pos(Position { x, y }, string)?;
+        let pos = Position { x, y };
+        Self::print_at_pos(&pos, string)?;
         Ok(())
     }
 
-    pub fn print_at_pos(pos: Position, string: &str) -> Result<(), Error> {
+    pub fn print_at_pos(pos: &Position, string: &str) -> Result<(), Error> {
         Self::move_cursor_to_pos(pos)?;
         Self::print(string)?;
         Ok(())
