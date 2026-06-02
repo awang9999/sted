@@ -1,4 +1,5 @@
 use crate::terminal::{Position, Terminal};
+use crate::view::View;
 use core::cmp::{max, min};
 use crossterm::event::{
     Event::{self, Key},
@@ -47,11 +48,11 @@ impl Editor {
             match code {
                 KeyCode::Up => self.position.y = max(0, self.position.y.saturating_sub(1)),
                 KeyCode::Down => {
-                    self.position.y = min(term_size.height, self.position.y.saturating_add(1))
+                    self.position.y = min(term_size.height, self.position.y.saturating_add(1));
                 }
                 KeyCode::Left => self.position.x = max(0, self.position.x.saturating_sub(1)),
                 KeyCode::Right => {
-                    self.position.x = min(term_size.width, self.position.x.saturating_add(1))
+                    self.position.x = min(term_size.width, self.position.x.saturating_add(1));
                 }
                 KeyCode::PageUp => self.position.y = 0,
                 KeyCode::PageDown => self.position.y = term_size.height,
@@ -69,67 +70,14 @@ impl Editor {
         Terminal::hide_cursor()?;
         if self.should_quit {
             Terminal::clear_screen()?;
+            Terminal::move_cursor_to(0, 0)?;
+            Terminal::print("Goodbye. \r\n")?;
         } else {
-            Self::draw_rows()?;
-            Self::draw_welcome()?;
+            View::render()?;
             Terminal::move_cursor_to_pos(&self.position)?;
-            Terminal::show_cursor()?;
-            Terminal::execute()?;
         }
-        Ok(())
-    }
-    fn draw_rows() -> Result<(), std::io::Error> {
-        let height = Terminal::size()?.height;
-        for current_row in 0..height {
-            Terminal::clear_row(current_row)?;
-            Terminal::print_at(0, current_row, "~")?;
-            if current_row.saturating_add(1) < height {
-                Terminal::print("\r\n")?;
-            }
-        }
-        Ok(())
-    }
-    fn draw_welcome() -> Result<(), std::io::Error> {
-        let size = Terminal::size()?;
-        let width = size.width;
-        let welcome = "Welcome to STED!";
-        let sted = "The (S)imple (T)erminal (Ed)itor";
-        let version = "Version 1.0.0";
-
-        #[allow(clippy::integer_division)]
-        let welcome_row = (size.height / 2).saturating_sub(2);
-        // we allow this since we don't care if our welcome message is put _exactly_ in the middle.
-        // it's allowed to be a bit to the left or right.
-        #[allow(clippy::integer_division)]
-        let welcome_col = width.saturating_sub(welcome.len()) / 2;
-        let sted_row = welcome_row.saturating_add(1);
-        #[allow(clippy::integer_division)]
-        let sted_col = width.saturating_sub(sted.len()) / 2;
-        let version_row = welcome_row.saturating_add(2);
-        #[allow(clippy::integer_division)]
-        let version_col = width.saturating_sub(version.len()) / 2;
-
-        Terminal::print_at(
-            0,
-            welcome_row,
-            &("~".to_string() + &" ".repeat(welcome_col.saturating_sub(1)) + welcome),
-        )?;
-
-        Terminal::print_at(
-            0,
-            sted_row,
-            &("~".to_string() + &" ".repeat(sted_col.saturating_sub(1)) + sted),
-        )?;
-
-        Terminal::print_at(
-            0,
-            version_row,
-            &("~".to_string() + &" ".repeat(version_col.saturating_sub(1)) + version),
-        )?;
-
-        let origin = Position { x: 0, y: 0 };
-        Terminal::move_cursor_to_pos(&origin)?;
-
+        Terminal::show_cursor()?;
+        Terminal::execute()?;
         Ok(())
     }
 }
