@@ -11,13 +11,15 @@ use crossterm::event::{
 pub struct Editor {
     should_quit: bool,
     position: Position,
+    view: View,
 }
 
 impl Editor {
-    pub const fn default() -> Self {
+    pub fn default() -> Self {
         Self {
             should_quit: false,
             position: Position { x: 0, y: 0 },
+            view: View::default(),
         }
     }
     pub fn run(&mut self) {
@@ -73,7 +75,7 @@ impl Editor {
             Terminal::move_cursor_to(0, 0)?;
             Terminal::print("Goodbye. \r\n")?;
         } else {
-            View::render()?;
+            self.view.render()?;
             Terminal::move_cursor_to_pos(&self.position)?;
         }
         Terminal::show_cursor()?;

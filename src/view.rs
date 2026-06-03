@@ -1,25 +1,31 @@
+use crate::buffer::Buffer;
 use crate::terminal::Terminal;
 
-pub struct View;
+pub struct View {
+    buffer: Buffer,
+}
 
 impl View {
-    pub fn render() -> Result<(), std::io::Error> {
-        Self::draw_rows()?;
+    pub fn default() -> Self {
+        View {
+            buffer: Buffer::default(),
+        }
+    }
+
+    pub fn render(&self) -> Result<(), std::io::Error> {
+        self.draw_rows()?;
         Self::draw_welcome()?;
-        Self::draw_hello()?;
         Ok(())
     }
 
-    fn draw_hello() -> Result<(), std::io::Error> {
-        Terminal::print_at(0, 0, "Hello Sted!")?;
-        Ok(())
-    }
-
-    fn draw_rows() -> Result<(), std::io::Error> {
+    fn draw_rows(&self) -> Result<(), std::io::Error> {
         let height = Terminal::size()?.height;
         for current_row in 0..height {
-            Terminal::clear_row(current_row)?;
-            Terminal::print_at(0, current_row, "~")?;
+            if current_row < self.buffer.lines.len() {
+                Terminal::print_at(0, current_row, &self.buffer.lines[current_row])?;
+            } else {
+                Terminal::print_at(0, current_row, "~")?;
+            }
             if current_row.saturating_add(1) < height {
                 Terminal::print("\r\n")?;
             }
