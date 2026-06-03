@@ -1,3 +1,4 @@
+use crate::buffer::Buffer;
 use crate::terminal::{Position, Terminal};
 use crate::view::View;
 use core::cmp::{max, min};
@@ -14,14 +15,45 @@ pub struct Editor {
     view: View,
 }
 
-impl Editor {
-    pub fn default() -> Self {
+impl Default for Editor {
+    fn default() -> Self {
         Self {
             should_quit: false,
             position: Position { x: 0, y: 0 },
             view: View::default(),
         }
     }
+}
+
+impl Editor {
+    pub fn with_file(file_path: &str) -> Result<Self, std::io::Error> {
+        let mut buf = Buffer::default();
+
+        match std::fs::read_to_string(file_path) {
+            Ok(file_content) => {
+                for line in file_content.lines() {
+                    buf.lines.push(String::from(line));
+                }
+            }
+            Err(error) => {
+                buf.lines.push(String::from(format!(
+                    "Failed to read file at {}",
+                    file_path
+                )));
+                buf.lines
+                    .push(String::from(format!("Error message: {}", error)));
+            }
+        }
+
+        let view = View::with_buffer(buf);
+
+        return Ok(Self {
+            should_quit: false,
+            position: Position { x: 0, y: 0 },
+            view: view,
+        });
+    }
+
     pub fn run(&mut self) {
         Terminal::initialize().unwrap();
         let result = self.repl();

@@ -5,11 +5,17 @@ pub struct View {
     buffer: Buffer,
 }
 
-impl View {
-    pub fn default() -> Self {
+impl Default for View {
+    fn default() -> Self {
         View {
             buffer: Buffer::default(),
         }
+    }
+}
+
+impl View {
+    pub fn with_buffer(buffer: Buffer) -> Self {
+        Self { buffer: buffer }
     }
 
     pub fn render(&self) -> Result<(), std::io::Error> {
@@ -21,11 +27,12 @@ impl View {
     fn draw_rows(&self) -> Result<(), std::io::Error> {
         let height = Terminal::size()?.height;
         for current_row in 0..height {
-            if current_row < self.buffer.lines.len() {
-                Terminal::print_at(0, current_row, &self.buffer.lines[current_row])?;
+            if let Some(line) = self.buffer.lines.get(current_row) {
+                Terminal::print_at(0, current_row, line)?;
             } else {
                 Terminal::print_at(0, current_row, "~")?;
             }
+
             if current_row.saturating_add(1) < height {
                 Terminal::print("\r\n")?;
             }
