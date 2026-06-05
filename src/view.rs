@@ -14,19 +14,18 @@ impl Default for View {
 }
 
 impl View {
-    pub fn with_buffer(buffer: Buffer) -> Self {
-        Self { buffer: buffer }
+    pub fn load(&mut self, file_name: &str) {
+        if let Ok(buffer) = Buffer::load(file_name) {
+            self.buffer = buffer;
+        }
     }
 
-    pub fn render(&self) -> Result<(), std::io::Error> {
-        self.draw_rows()?;
-        Self::draw_welcome()?;
-        Ok(())
-    }
-
-    fn draw_rows(&self) -> Result<(), std::io::Error> {
+    pub fn render_buffer(&self) -> Result<(), std::io::Error> {
         let height = Terminal::size()?.height;
+
         for current_row in 0..height {
+            Terminal::clear_row(current_row)?;
+
             if let Some(line) = self.buffer.lines.get(current_row) {
                 Terminal::print_at(0, current_row, line)?;
             } else {
@@ -37,9 +36,21 @@ impl View {
                 Terminal::print("\r\n")?;
             }
         }
+
         Ok(())
     }
-    fn draw_welcome() -> Result<(), std::io::Error> {
+
+    pub fn render(&self) -> Result<(), std::io::Error> {
+        self.render_buffer()?;
+
+        if self.buffer.is_empty() {
+            Self::render_welcome_screen()?;
+        }
+
+        Ok(())
+    }
+
+    fn render_welcome_screen() -> Result<(), std::io::Error> {
         let size = Terminal::size()?;
         let width = size.width;
         let welcome = "Welcome to STED!";
