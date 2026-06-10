@@ -3,11 +3,15 @@ use std::fs::read_to_string;
 #[derive(Clone)]
 pub struct Buffer {
     pub lines: Vec<String>,
+    pub modified: bool,
 }
 
 impl Default for Buffer {
     fn default() -> Self {
-        Self { lines: vec![] }
+        Self {
+            lines: vec![],
+            modified: true,
+        }
     }
 }
 
@@ -34,6 +38,9 @@ impl Buffer {
             }
         }
 
-        Ok(Self { lines: my_lines })
+        Ok(Self {
+            lines: my_lines,
+            modified: true,
+        })
     }
 }
