@@ -1,6 +1,9 @@
 use crossterm::cursor::{Hide, MoveTo, MoveToRow, Show};
 use crossterm::style::Print;
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
+use crossterm::terminal::{
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size,
+};
 use crossterm::{Command, queue};
 use std::io::{Error, Write, stdout};
 
@@ -10,6 +13,7 @@ pub struct Size {
     pub width: usize,
 }
 
+#[derive(Default, Copy, Clone)]
 pub struct Position {
     // Origin is top left corner. Positive x is right, positive y is down
     pub x: usize,
@@ -27,13 +31,16 @@ pub struct Terminal;
 
 impl Terminal {
     pub fn terminate() -> Result<(), Error> {
+        Self::queue_command(LeaveAlternateScreen)?;
+        Self::show_cursor()?;
+        Self::execute()?;
         disable_raw_mode()?;
         Ok(())
     }
     pub fn initialize() -> Result<(), Error> {
         enable_raw_mode()?;
+        Self::queue_command(EnterAlternateScreen)?;
         Self::clear_screen()?;
-        Self::move_cursor_to(0, 0)?;
         Self::execute()?;
         Ok(())
     }

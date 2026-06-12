@@ -25,56 +25,67 @@ impl Default for Editor {
 }
 
 impl Editor {
-    pub fn handle_args(&mut self) {
+    pub fn new() -> Result<Self, std::io::Error> {
+        let current_hook = std::panic::take_hook();
+
+        std::panic::set_hook(Box::new(move |panic_info| {
+            //do the cleanup work
+            let _ = Terminal::terminate();
+            current_hook(panic_info);
+        }));
+
+        Terminal::initialize()?;
+
+        let mut view = View::default();
+
         let args: Vec<String> = std::env::args().collect();
 
         if let Some(file_name) = args.get(1) {
-            self.view.load(file_name);
+            let _ = view.load(file_name);
         }
+
+        Ok(Self {
+            should_quit: false,
+            position: Position::default(),
+            view,
+        })
     }
 
     pub fn run(&mut self) {
-        Terminal::initialize().unwrap();
-        self.handle_args();
-        let result = self.repl();
-        Terminal::terminate().unwrap();
-        result.unwrap();
-    }
-
-    fn repl(&mut self) -> Result<(), std::io::Error> {
         loop {
-            self.refresh_screen()?;
+            self.refresh_screen();
             if self.should_quit {
                 break;
             }
-            let event = read()?;
-            self.evaluate_event(event)?;
+
+            match read() {
+                Ok(event) => self.evaluate_event(event),
+                Err(err) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        panic!("Could not read event: {err:?}");
+                    }
+                }
+            }
         }
-        Ok(())
     }
 
-    fn evaluate_event(&mut self, event: Event) -> Result<(), std::io::Error> {
+    fn evaluate_event(&mut self, event: Event) {
         match event {
             Key(key_event) => self.process_key_event(key_event),
-            Mouse(_mouse_event) => Ok(()),
-            FocusGained => Ok(()),
-            FocusLost => Ok(()),
+            Mouse(_mouse_event) => (),
+            FocusGained => (),
+            FocusLost => (),
             Resize(width, height) => self.process_resize_event(width.into(), height.into()),
-            Paste(_pasted_string) => Ok(()),
-        }?;
-
-        Ok(())
+            Paste(_pasted_string) => (),
+        };
     }
 
-    fn process_resize_event(&mut self, width: usize, height: usize) -> Result<(), std::io::Error> {
-        self.view.resize(Size {
-            width: width,
-            height: height,
-        });
-        Ok(())
+    fn process_resize_event(&mut self, width: usize, height: usize) {
+        self.view.resize(Size { width, height });
     }
 
-    fn process_key_event(&mut self, key_event: KeyEvent) -> Result<(), std::io::Error> {
+    fn process_key_event(&mut self, key_event: KeyEvent) {
         let KeyEvent {
             code, modifiers, ..
         } = key_event;
@@ -93,8 +104,6 @@ impl Editor {
             | KeyCode::End => self.move_caret(code),
             _ => (),
         }
-
-        Ok(())
     }
 
     fn move_caret(&mut self, code: KeyCode) {
@@ -113,20 +122,20 @@ impl Editor {
         }
     }
 
-    fn refresh_screen(&mut self) -> Result<(), std::io::Error> {
-        Terminal::hide_cursor()?;
+    fn refresh_screen(&mut self) {
+        let _ = Terminal::hide_cursor();
+        self.view.render();
+        let _ = Terminal::move_cursor_to_pos(&self.position);
+        let _ = Terminal::show_cursor();
+        let _ = Terminal::execute();
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        let _ = Terminal::terminate();
         if self.should_quit {
-            Terminal::clear_screen()?;
-            Terminal::move_cursor_to(0, 0)?;
-            Terminal::print("Goodbye. \r\n")?;
-        } else {
-            if self.view.is_modified() {
-                self.view.render()?;
-            }
-            Terminal::move_cursor_to_pos(&self.position)?;
+            let _ = Terminal::print("Goodbye. \r\n");
         }
-        Terminal::show_cursor()?;
-        Terminal::execute()?;
-        Ok(())
     }
 }

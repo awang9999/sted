@@ -18,10 +18,6 @@ impl Default for View {
 }
 
 impl View {
-    pub fn is_modified(&self) -> bool {
-        self.modified || self.buffer.modified
-    }
-
     pub fn resize(&mut self, to: Size) {
         self.size = to;
         self.modified = true;
@@ -37,28 +33,26 @@ impl View {
         }
     }
 
-    pub fn render_buffer(&mut self) -> Result<(), std::io::Error> {
+    pub fn render_buffer(&mut self) {
         let width = self.size.width;
         let height = self.size.height;
 
         for current_row in 0..height {
-            Terminal::clear_row(current_row)?;
+            let _ = Terminal::clear_row(current_row);
 
             if let Some(line) = self.buffer.lines.get(current_row) {
                 let truncated_line = Self::truncate_line(line, width);
-                Terminal::print_at(0, current_row, truncated_line)?;
+                let _ = Terminal::print_at(0, current_row, truncated_line);
             } else {
-                Terminal::print_at(0, current_row, "~")?;
+                let _ = Terminal::print_at(0, current_row, "~");
             }
 
             if current_row.saturating_add(1) < height {
-                Terminal::move_cursor_to(0, current_row.saturating_add(1))?;
+                let _ = Terminal::move_cursor_to(0, current_row.saturating_add(1));
             }
         }
 
         self.buffer.modified = false;
-
-        Ok(())
     }
 
     fn truncate_line(line: &str, width: usize) -> &str {
@@ -69,16 +63,16 @@ impl View {
             return truncated_line;
         };
     }
-    pub fn render(&mut self) -> Result<(), std::io::Error> {
-        self.render_buffer()?;
+    pub fn render(&mut self) {
+        if self.modified {
+            let _ = self.render_buffer();
 
-        if self.buffer.is_empty() {
-            self.render_welcome_screen()?;
+            if self.buffer.is_empty() {
+                let _ = self.render_welcome_screen();
+            }
+
+            self.modified = false;
         }
-
-        self.modified = false;
-
-        Ok(())
     }
 
     fn render_welcome_screen(&self) -> Result<(), std::io::Error> {
