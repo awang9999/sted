@@ -8,6 +8,7 @@
 )]
 
 mod buffer;
+mod common;
 mod editor;
 mod terminal;
 mod view;

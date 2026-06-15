@@ -1,6 +1,6 @@
-use crate::terminal::{Position, Size, Terminal};
-use crate::view::View;
-use core::cmp::{max, min};
+use crate::common::types::Size;
+use crate::terminal::Terminal;
+use crate::view::{CaretDirection, View};
 use crossterm::event::{
     Event::{self, FocusGained, FocusLost, Key, Mouse, Paste, Resize},
     KeyCode,
@@ -10,7 +10,6 @@ use crossterm::event::{
 
 pub struct Editor {
     should_quit: bool,
-    position: Position,
     view: View,
 }
 
@@ -18,7 +17,6 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             should_quit: false,
-            position: Position { x: 0, y: 0 },
             view: View::default(),
         }
     }
@@ -46,7 +44,6 @@ impl Editor {
 
         Ok(Self {
             should_quit: false,
-            position: Position::default(),
             view,
         })
     }
@@ -107,17 +104,15 @@ impl Editor {
     }
 
     fn move_caret(&mut self, code: KeyCode) {
-        let Size { width, height } = self.view.get_size();
-
         match code {
-            KeyCode::Up => self.position.y = max(0, self.position.y.saturating_sub(1)),
-            KeyCode::Down => self.position.y = min(width, self.position.y.saturating_add(1)),
-            KeyCode::Left => self.position.x = max(0, self.position.x.saturating_sub(1)),
-            KeyCode::Right => self.position.x = min(width, self.position.x.saturating_add(1)),
-            KeyCode::PageUp => self.position.y = 0,
-            KeyCode::PageDown => self.position.y = height,
-            KeyCode::Home => self.position.x = 0,
-            KeyCode::End => self.position.x = width,
+            KeyCode::Up => self.view.move_caret_position(CaretDirection::Up),
+            KeyCode::Down => self.view.move_caret_position(CaretDirection::Down),
+            KeyCode::Left => self.view.move_caret_position(CaretDirection::Left),
+            KeyCode::Right => self.view.move_caret_position(CaretDirection::Right),
+            KeyCode::PageUp => self.view.move_caret_position(CaretDirection::Top),
+            KeyCode::PageDown => self.view.move_caret_position(CaretDirection::Bottom),
+            KeyCode::Home => self.view.move_caret_position(CaretDirection::LineStart),
+            KeyCode::End => self.view.move_caret_position(CaretDirection::LineEnd),
             _ => (),
         }
     }
@@ -125,7 +120,7 @@ impl Editor {
     fn refresh_screen(&mut self) {
         let _ = Terminal::hide_cursor();
         self.view.render();
-        let _ = Terminal::move_cursor_to_pos(&self.position);
+        let _ = Terminal::move_cursor_to_pos(&self.view.caret_position);
         let _ = Terminal::show_cursor();
         let _ = Terminal::execute();
     }
