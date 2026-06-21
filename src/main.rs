@@ -10,6 +10,7 @@
 mod buffer;
 mod common;
 mod editor;
+mod editorcommand;
 mod terminal;
 mod view;
 

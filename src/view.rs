@@ -1,27 +1,14 @@
 use crate::buffer::Buffer;
-use crate::common::types::{Position, Size};
-use crate::terminal::Terminal;
-use std::cmp::min;
-
-const MAX_LINES_PAST_BUFFER: usize = 10;
-
-pub enum CaretDirection {
-    Up,
-    Down,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    LineStart,
-    LineEnd,
-}
+use crate::common::types::Location;
+use crate::editorcommand::{Direction, EditorCommand};
+use crate::terminal::{Position, Size, Terminal};
 
 pub struct View {
     buffer: Buffer,
     modified: bool,
     size: Size,
-    pub caret_position: Position,
-    pub scroll_offset: Position,
+    pub location: Location,
+    pub scroll_offset: Location,
 }
 
 impl Default for View {
@@ -30,8 +17,8 @@ impl Default for View {
             buffer: Buffer::default(),
             modified: true,
             size: Terminal::size().unwrap_or_default(),
-            caret_position: Position::default(),
-            scroll_offset: Position::default(),
+            location: Location::default(),
+            scroll_offset: Location::default(),
         }
     }
 }
@@ -45,24 +32,39 @@ impl View {
     pub fn load(&mut self, file_name: &str) {
         if let Ok(buffer) = Buffer::load(file_name) {
             self.buffer = buffer;
+            self.modified = true;
         }
     }
 
+    pub fn get_position(&self) -> Position {
+        self.location.subtract(&self.scroll_offset).into()
+    }
+
+    pub fn handle_command(&mut self, event: EditorCommand) {
+        match event {
+            EditorCommand::Resize(size) => self.resize(size),
+            EditorCommand::Move(direction) => self.move_location(direction),
+            EditorCommand::Quit => (),
+        };
+    }
+
     pub fn render_buffer(&mut self) {
-        let height = self.size.height;
+        let Size { height, width } = self.size;
+        if height == 0 || width == 0 {
+            return;
+        }
 
         for current_row in 0..height {
             let _ = Terminal::clear_row(current_row);
+            let top = self.scroll_offset.y;
 
-            if let Some(line) = self
-                .buffer
-                .lines
-                .get(current_row.saturating_add(self.scroll_offset.row))
-            {
-                let truncated_line = self.get_line_with_x_offset(line);
-                let _ = Terminal::print_at(0, current_row, truncated_line);
+            if let Some(line) = self.buffer.lines.get(current_row.saturating_add(top)) {
+                let left = self.scroll_offset.x;
+                let right = self.scroll_offset.x.saturating_add(width);
+                let truncated_line = &line.get(left..right);
+                let _ = Self::render_line(current_row, truncated_line);
             } else {
-                let _ = Terminal::print_at(0, current_row, "~");
+                let _ = Self::render_line(current_row, "~");
             }
 
             if current_row.saturating_add(1) < height {
@@ -73,23 +75,23 @@ impl View {
         self.buffer.modified = false;
     }
 
-    fn get_line_with_x_offset<'a>(&self, line: &'a str) -> &'a str {
-        let line_start = min(self.scroll_offset.col, line.len());
-        let line_end = min(line_start + self.size.width, line.len());
-        let offset_line = &line[line_start..line_end];
-        offset_line
+    fn render_line(row: usize, line_text: &str) {
+        let result = Terminal::print_row(row, line_text);
+        debug_assert!(result.is_ok(), "Failed to render line");
     }
 
     pub fn render(&mut self) {
-        if self.modified {
-            let _ = self.render_buffer();
-
-            if self.buffer.is_empty() {
-                let _ = self.render_welcome_screen();
-            }
-
-            self.modified = false;
+        if !self.modified {
+            return;
         }
+
+        let _ = self.render_buffer();
+
+        if self.buffer.is_empty() {
+            let _ = self.render_welcome_screen();
+        }
+
+        self.modified = false;
     }
 
     fn render_welcome_screen(&self) -> Result<(), std::io::Error> {
@@ -119,83 +121,80 @@ impl View {
         Ok(())
     }
 
-    pub fn move_caret_position(&mut self, direction: CaretDirection) {
-        // if we're attempting to move out of bounds, only change the offset.
-        // Else, modify the caret position.
+    pub fn move_location(&mut self, direction: Direction) {
+        let Location { mut x, mut y } = self.location;
         match direction {
-            CaretDirection::Up => {
-                if self.caret_position.row <= 0 {
-                    self.scroll_offset.row = self.scroll_offset.row.saturating_sub(1);
-                    self.modified = true;
-                } else {
-                    self.set_caret_position(
-                        self.caret_position.col,
-                        self.caret_position.row.saturating_sub(1),
-                    )
-                }
+            Direction::Up => y = y.saturating_sub(1),
+            Direction::Down => y = y.saturating_add(1),
+            Direction::Left => x = x.saturating_sub(1),
+            Direction::Right => x = x.saturating_add(1),
+            Direction::BufferTop => y = 0,
+            Direction::BufferBottom => {
+                // sets location y to the last line of the buffer
+                y = self.buffer.lines.len().saturating_sub(1);
             }
-            CaretDirection::Down => {
-                // If we scroll past the buffer lines length, only show
-                // MAX_LINES_PAST_BUFFER more blank lines.
-                if self.scroll_offset.row + self.size.height
-                    >= self.buffer.lines.len() + MAX_LINES_PAST_BUFFER
-                {
-                    () // Do nothing
+            Direction::LineStart => x = 0,
+            Direction::LineEnd => {
+                // sets location x to the last character of the line
+                if let Some(line) = self.buffer.lines.get(self.location.y) {
+                    x = line.len();
                 }
-                // If we're already at the y max of the terminal,
-                // leave the cursor at the same y max and increment
-                // the y offset.
-                else if self.caret_position.row >= self.size.height {
-                    self.scroll_offset.row = self.scroll_offset.row.saturating_add(1);
-                    self.modified = true;
-                } else {
-                    self.set_caret_position(
-                        self.caret_position.col,
-                        self.caret_position.row.saturating_add(1),
-                    )
-                }
-            }
-            CaretDirection::Left => {
-                if self.caret_position.col <= 0 {
-                    self.scroll_offset.col = self.scroll_offset.col.saturating_sub(1);
-                    self.modified = true;
-                } else {
-                    self.set_caret_position(
-                        self.caret_position.col.saturating_sub(1),
-                        self.caret_position.row,
-                    )
-                }
-            }
-            CaretDirection::Right => {
-                // If we're already at the x max of the terminal,
-                // leave the cursor at the same x max and increment
-                // the x offset.
-                if self.caret_position.col >= self.size.width {
-                    self.scroll_offset.col = self.scroll_offset.col.saturating_add(1);
-                    self.modified = true;
-                } else {
-                    self.set_caret_position(
-                        self.caret_position.col.saturating_add(1),
-                        self.caret_position.row,
-                    )
-                }
-            }
-            CaretDirection::Top => self.set_caret_position(self.caret_position.col, 0),
-            CaretDirection::Bottom => {
-                self.set_caret_position(self.caret_position.col, self.size.height)
-            }
-            CaretDirection::LineStart => self.set_caret_position(0, self.caret_position.row),
-            CaretDirection::LineEnd => {
-                self.set_caret_position(self.size.width, self.caret_position.row)
             }
         }
+        self.set_location(x, y);
+        self.scroll_location_into_view();
     }
 
-    pub fn set_caret_position(&mut self, x: usize, y: usize) {
-        self.set_caret_position_pos(Position { col: x, row: y })
+    pub fn scroll_location_into_view(&mut self) {
+        let Location { x, y } = self.location;
+        let Location {
+            x: mut scroll_x,
+            y: mut scroll_y,
+        } = self.scroll_offset;
+        let Size { width, height } = self.size;
+        let mut offset_changed = false;
+
+        // Vertical scroll
+        // If location y is less than scroll y, set scroll y to location y.
+        if y < scroll_y {
+            scroll_y = y;
+            offset_changed = true;
+        }
+        // If location y is more than scroll y + view height
+        // set scroll y to be one more than location y minus height
+        // This finds the "top left y of the viewport" relative to
+        // the buffer origin.
+        else if y >= scroll_y.saturating_add(height) {
+            scroll_y = y.saturating_sub(height).saturating_add(1);
+            offset_changed = true;
+        }
+
+        // Horizontal scroll
+        if x < scroll_x {
+            scroll_x = x;
+            offset_changed = true;
+        } else if x >= scroll_x.saturating_add(width) {
+            scroll_x = x.saturating_sub(width).saturating_add(1);
+            offset_changed = true;
+        }
+
+        self.set_scroll_offset(scroll_x, scroll_y);
+        self.modified = offset_changed;
     }
 
-    pub fn set_caret_position_pos(&mut self, pos: Position) {
-        self.caret_position = pos
+    pub fn set_location(&mut self, x: usize, y: usize) {
+        self.set_location_coord(Location { x: x, y: y })
+    }
+
+    pub fn set_location_coord(&mut self, pos: Location) {
+        self.location = pos
+    }
+
+    pub fn set_scroll_offset(&mut self, x: usize, y: usize) {
+        self.set_scroll_offset_coord(Location { x: x, y: y })
+    }
+
+    pub fn set_scroll_offset_coord(&mut self, pos: Location) {
+        self.scroll_offset = pos
     }
 }

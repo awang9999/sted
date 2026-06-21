@@ -7,7 +7,19 @@ use crossterm::terminal::{
 use crossterm::{Command, queue};
 use std::io::{Error, Write, stdout};
 
-use crate::common::types::{Position, Size as TSize};
+// A Size here represents the width and height of the Terminal in characters
+#[derive(Default, Copy, Clone)]
+pub struct Size {
+    pub height: usize,
+    pub width: usize,
+}
+// A Position here represents a location relative to the top left of the terminal window.
+// col: 0, row: 0 represents the top left character.
+#[derive(Copy, Clone, Default)]
+pub struct Position {
+    pub col: usize,
+    pub row: usize,
+}
 
 /// Represents the Terminal.
 /// Edge Case for platforms where `usize` < `u16`:
@@ -59,10 +71,10 @@ impl Terminal {
     /// Returns the current size of this Terminal.
     /// Edge Case for systems with `usize` < `u16`:
     /// * A `Size` representing the terminal size. Any coordinate `z` truncated to `usize` if `usize` < `z` < `u16`
-    pub fn size() -> Result<TSize, Error> {
+    pub fn size() -> Result<Size, Error> {
         let (w_u16, h_u16) = size()?;
         #[allow(clippy::cast_possible_truncation)]
-        Ok(TSize {
+        Ok(Size {
             width: w_u16 as usize,
             height: h_u16 as usize,
         })
@@ -89,6 +101,11 @@ impl Terminal {
     pub fn print_at(x: usize, y: usize, string: &str) -> Result<(), Error> {
         let pos = Position { col: x, row: y };
         Self::print_at_pos(&pos, string)?;
+        Ok(())
+    }
+
+    pub fn print_row(row: usize, string: &str) -> Result<(), Error> {
+        Self::print_at(0, row, string)?;
         Ok(())
     }
 
