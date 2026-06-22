@@ -4,10 +4,10 @@ use std::convert::TryFrom;
 use super::terminal::Size;
 
 pub enum Direction {
-    BufferTop,
-    BufferBottom,
-    LineStart,
-    LineEnd,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Up,
     Left,
     Right,
@@ -33,10 +33,10 @@ impl TryFrom<Event> for EditorCommand {
                 (KeyCode::Down, _) => Ok(Self::Move(Direction::Down)),
                 (KeyCode::Left, _) => Ok(Self::Move(Direction::Left)),
                 (KeyCode::Right, _) => Ok(Self::Move(Direction::Right)),
-                (KeyCode::PageDown, _) => Ok(Self::Move(Direction::BufferBottom)),
-                (KeyCode::PageUp, _) => Ok(Self::Move(Direction::BufferTop)),
-                (KeyCode::Home, _) => Ok(Self::Move(Direction::LineStart)),
-                (KeyCode::End, _) => Ok(Self::Move(Direction::LineEnd)),
+                (KeyCode::PageDown, _) => Ok(Self::Move(Direction::PageDown)),
+                (KeyCode::PageUp, _) => Ok(Self::Move(Direction::PageUp)),
+                (KeyCode::Home, _) => Ok(Self::Move(Direction::Home)),
+                (KeyCode::End, _) => Ok(Self::Move(Direction::End)),
                 _ => Err(format!("Key Code not supported: {code:?}")),
             },
             Event::Resize(width_u16, height_u16) => {

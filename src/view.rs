@@ -2,6 +2,7 @@ use crate::buffer::Buffer;
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
 use crate::terminal::{Position, Size, Terminal};
+use std::cmp::min;
 
 pub struct View {
     buffer: Buffer,
@@ -9,6 +10,7 @@ pub struct View {
     size: Size,
     pub location: Location,
     pub scroll_offset: Location,
+    desired_x: usize,
 }
 
 impl Default for View {
@@ -19,6 +21,7 @@ impl Default for View {
             size: Terminal::size().unwrap_or_default(),
             location: Location::default(),
             scroll_offset: Location::default(),
+            desired_x: 0,
         }
     }
 }
@@ -123,24 +126,65 @@ impl View {
 
     pub fn move_location(&mut self, direction: Direction) {
         let Location { mut x, mut y } = self.location;
+        let height = self.size.height;
+        let buffer_length = self.buffer.lines.len();
+
         match direction {
+            // Vertical movements
             Direction::Up => y = y.saturating_sub(1),
-            Direction::Down => y = y.saturating_add(1),
-            Direction::Left => x = x.saturating_sub(1),
-            Direction::Right => x = x.saturating_add(1),
-            Direction::BufferTop => y = 0,
-            Direction::BufferBottom => {
-                // sets location y to the last line of the buffer
-                y = self.buffer.lines.len().saturating_sub(1);
+            Direction::Down => y = y.saturating_add(1).min(buffer_length),
+            Direction::PageUp => y = y.saturating_sub(height),
+            Direction::PageDown => y = (y.saturating_add(height)).min(buffer_length),
+
+            // Horizontal movements
+            Direction::Left => {
+                if x <= 0 && y > 0 {
+                    y = y.saturating_sub(1);
+                    x = self.buffer.lines.get(y).map(|l| l.len()).unwrap_or(0);
+                } else {
+                    x = x.saturating_sub(1);
+                }
+                self.desired_x = x;
             }
-            Direction::LineStart => x = 0,
-            Direction::LineEnd => {
-                // sets location x to the last character of the line
-                if let Some(line) = self.buffer.lines.get(self.location.y) {
-                    x = line.len();
+
+            Direction::Right => {
+                if let Some(len) = self.buffer.lines.get(y).map(|l| l.len()) {
+                    if x >= len && y < buffer_length {
+                        y = y.saturating_add(1);
+                        x = 0;
+                    } else if x < len {
+                        x = x.saturating_add(1);
+                    }
+                }
+                self.desired_x = x;
+            }
+
+            // Home / End
+            Direction::Home => {
+                x = 0;
+                self.desired_x = x;
+            }
+            Direction::End => {
+                if let Some(len) = self.buffer.lines.get(y).map(|l| l.len()) {
+                    x = len;
+                    self.desired_x = x;
                 }
             }
         }
+
+        // Clamp x column to fit within the new line's length when moving vertically
+        if matches!(
+            direction,
+            Direction::Up | Direction::Down | Direction::PageUp | Direction::PageDown
+        ) {
+            x = self
+                .buffer
+                .lines
+                .get(y)
+                .map(|l| min(self.desired_x, l.len()))
+                .unwrap_or(0);
+        }
+
         self.set_location(x, y);
         self.scroll_location_into_view();
     }
