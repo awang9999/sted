@@ -190,40 +190,51 @@ impl View {
     }
 
     pub fn scroll_location_into_view(&mut self) {
-        let Location { x, y } = self.location;
-        let Location {
-            x: mut scroll_x,
-            y: mut scroll_y,
-        } = self.scroll_offset;
+        let (x, y) = (self.location.x, self.location.y);
+        let mut scroll = self.scroll_offset;
         let Size { width, height } = self.size;
-        let mut offset_changed = false;
+        let prev = self.scroll_offset;
 
         // Vertical scroll
-        // If location y is less than scroll y, set scroll y to location y.
-        if y < scroll_y {
-            scroll_y = y;
-            offset_changed = true;
+        // If cursor y is above the viewport, snap scroll_y to the cursor
+        if y < scroll.y {
+            scroll.y = y;
         }
-        // If location y is more than scroll y + view height
-        // set scroll y to be one more than location y minus height
-        // This finds the "top left y of the viewport" relative to
-        // the buffer origin.
-        else if y >= scroll_y.saturating_add(height) {
-            scroll_y = y.saturating_sub(height).saturating_add(1);
-            offset_changed = true;
+        // If cursor y is below the viewport, push the viewport down by the offset
+        else if y >= scroll.y.saturating_add(height) {
+            scroll.y = y.saturating_sub(height).saturating_add(1);
         }
 
         // Horizontal scroll
-        if x < scroll_x {
-            scroll_x = x;
-            offset_changed = true;
-        } else if x >= scroll_x.saturating_add(width) {
-            scroll_x = x.saturating_sub(width).saturating_add(1);
-            offset_changed = true;
+        // Use the target line's saved horizontal offset as the baseline
+        let line_scroll_x = self.buffer.lines.get(y).map(|l| l.scroll_x).unwrap_or(0);
+        let line_len = self.buffer.lines.get(y).map(|l| l.len()).unwrap_or(0);
+
+        // If cursor x is left of the baseline, scroll left to the cursor
+        if x < line_scroll_x {
+            scroll.x = x;
+        }
+        // If cursor x is right of the viewport, scroll right to keep it visible
+        else if x >= line_scroll_x.saturating_add(width) {
+            scroll.x = x.saturating_sub(width).saturating_add(1);
+        // Use the saved line scroll to keep the cursor relative to the last time the
+        // user was on this line.
+        } else {
+            scroll.x = line_scroll_x;
         }
 
-        self.set_scroll_offset(scroll_x, scroll_y);
-        self.modified = offset_changed;
+        // Clamp scroll_x to the line's length so we never scroll past the visible content
+        let max_scroll_x = line_len.saturating_sub(width);
+        scroll.x = scroll.x.min(max_scroll_x);
+
+        // Persist the updated horizontal scroll state to the target line
+        if let Some(line) = self.buffer.lines.get_mut(y) {
+            line.scroll_x = scroll.x;
+        }
+
+        // Apply the new scroll offset and mark dirty if the view changed
+        self.scroll_offset = scroll;
+        self.modified = scroll.x != prev.x || scroll.y != prev.y;
     }
 
     pub fn set_location(&mut self, x: usize, y: usize) {
@@ -232,13 +243,5 @@ impl View {
 
     pub fn set_location_coord(&mut self, pos: Location) {
         self.location = pos
-    }
-
-    pub fn set_scroll_offset(&mut self, x: usize, y: usize) {
-        self.set_scroll_offset_coord(Location { x: x, y: y })
-    }
-
-    pub fn set_scroll_offset_coord(&mut self, pos: Location) {
-        self.scroll_offset = pos
     }
 }
