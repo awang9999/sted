@@ -8,8 +8,8 @@ pub struct View {
     buffer: Buffer,
     modified: bool,
     size: Size,
-    pub location: Location,
-    pub scroll_offset: Location,
+    pub location: Location,      // location in the text (col, row) of grapheme
+    pub scroll_offset: Position, // top left corner of viewport as a grid (independent of grapheme width)
     desired_x: usize,
 }
 
@@ -20,7 +20,7 @@ impl Default for View {
             modified: true,
             size: Terminal::size().unwrap_or_default(),
             location: Location::default(),
-            scroll_offset: Location::default(),
+            scroll_offset: Position::default(),
             desired_x: 0,
         }
     }
@@ -39,8 +39,12 @@ impl View {
         }
     }
 
-    pub fn get_position(&self) -> Position {
-        self.location.subtract(&self.scroll_offset).into()
+    pub fn get_caret_position(&self) -> Position {
+        let caret_position = Position {
+            col: self.buffer.get_col_from_text_location(self.location),
+            row: self.location.y,
+        };
+        caret_position.subtract(&self.scroll_offset).into()
     }
 
     pub fn handle_command(&mut self, event: EditorCommand) {
@@ -59,11 +63,11 @@ impl View {
 
         for current_row in 0..height {
             let _ = Terminal::clear_row(current_row);
-            let top = self.scroll_offset.y;
+            let top = self.scroll_offset.row;
 
             if let Some(line) = self.buffer.lines.get(current_row.saturating_add(top)) {
-                let left = self.scroll_offset.x;
-                let right = self.scroll_offset.x.saturating_add(width);
+                let left = self.scroll_offset.col;
+                let right = self.scroll_offset.col.saturating_add(width);
                 let truncated_line = &line.get(left..right);
                 let _ = Self::render_line(current_row, truncated_line);
             } else {
@@ -132,15 +136,31 @@ impl View {
         match direction {
             // Vertical movements
             Direction::Up => y = y.saturating_sub(1),
-            Direction::Down => y = y.saturating_add(1).min(buffer_length),
+            Direction::Down => {
+                if y < buffer_length {
+                    y = y.saturating_add(1).min(buffer_length);
+                }
+            }
             Direction::PageUp => y = y.saturating_sub(height),
-            Direction::PageDown => y = (y.saturating_add(height)).min(buffer_length),
+            Direction::PageDown => {
+                let page_y = y.saturating_add(height);
+                if page_y > buffer_length || self.buffer.lines.is_empty() {
+                    y = buffer_length;
+                } else {
+                    y = page_y.min(buffer_length);
+                }
+            }
 
             // Horizontal movements
             Direction::Left => {
                 if x <= 0 && y > 0 {
                     y = y.saturating_sub(1);
-                    x = self.buffer.lines.get(y).map(|l| l.len()).unwrap_or(0);
+                    x = self
+                        .buffer
+                        .lines
+                        .get(y)
+                        .map(|l| l.grapheme_count())
+                        .unwrap_or(0);
                 } else {
                     x = x.saturating_sub(1);
                 }
@@ -148,7 +168,7 @@ impl View {
             }
 
             Direction::Right => {
-                if let Some(len) = self.buffer.lines.get(y).map(|l| l.len()) {
+                if let Some(len) = self.buffer.lines.get(y).map(|l| l.grapheme_count()) {
                     if x >= len && y < buffer_length {
                         y = y.saturating_add(1);
                         x = 0;
@@ -165,7 +185,7 @@ impl View {
                 self.desired_x = x;
             }
             Direction::End => {
-                if let Some(len) = self.buffer.lines.get(y).map(|l| l.len()) {
+                if let Some(len) = self.buffer.lines.get(y).map(|l| l.grapheme_count()) {
                     x = len;
                     self.desired_x = x;
                 }
@@ -181,7 +201,7 @@ impl View {
                 .buffer
                 .lines
                 .get(y)
-                .map(|l| min(self.desired_x, l.len()))
+                .map(|l| min(self.desired_x, l.grapheme_count()))
                 .unwrap_or(0);
         }
 
@@ -197,44 +217,60 @@ impl View {
 
         // Vertical scroll
         // If cursor y is above the viewport, snap scroll_y to the cursor
-        if y < scroll.y {
-            scroll.y = y;
+        if y < scroll.row {
+            scroll.row = y;
         }
         // If cursor y is below the viewport, push the viewport down by the offset
-        else if y >= scroll.y.saturating_add(height) {
-            scroll.y = y.saturating_sub(height).saturating_add(1);
+        else if y >= scroll.row.saturating_add(height) {
+            scroll.row = y.saturating_sub(height).saturating_add(1);
         }
 
-        // Horizontal scroll
-        // Use the target line's saved horizontal offset as the baseline
-        let line_scroll_x = self.buffer.lines.get(y).map(|l| l.scroll_x).unwrap_or(0);
-        let line_len = self.buffer.lines.get(y).map(|l| l.len()).unwrap_or(0);
-
-        // If cursor x is left of the baseline, scroll left to the cursor
-        if x < line_scroll_x {
-            scroll.x = x;
-        }
-        // If cursor x is right of the viewport, scroll right to keep it visible
-        else if x >= line_scroll_x.saturating_add(width) {
-            scroll.x = x.saturating_sub(width).saturating_add(1);
-        // Use the saved line scroll to keep the cursor relative to the last time the
-        // user was on this line.
+        // Horizontal scroll - when cursor is past EOF, horizontal scroll data doesn't exist yet
+        let clamped_y = y.min(self.buffer.lines.len().saturating_sub(1));
+        let line = if self.buffer.lines.is_empty() {
+            None
         } else {
-            scroll.x = line_scroll_x;
-        }
+            self.buffer
+                .lines
+                .get(clamped_y)
+                .or_else(|| self.buffer.lines.last())
+        };
 
-        // Clamp scroll_x to the line's length so we never scroll past the visible content
-        let max_scroll_x = line_len.saturating_sub(width);
-        scroll.x = scroll.x.min(max_scroll_x);
+        if let Some(line) = line {
+            // Use the target line's saved horizontal offset as the baseline
+            let line_scroll_x = line.scroll_x;
+            let line_graphemes = line.grapheme_count();
+            let line_len = line.width_until(line_graphemes);
+            let cur_x_position = line.width_until(x);
 
-        // Persist the updated horizontal scroll state to the target line
-        if let Some(line) = self.buffer.lines.get_mut(y) {
-            line.scroll_x = scroll.x;
+            // If cursor x is left of the baseline, scroll left to the cursor
+            if cur_x_position < line_scroll_x {
+                scroll.col = cur_x_position;
+            }
+            // If cursor x is right of the viewport, scroll right to keep it visible
+            else if cur_x_position >= line_scroll_x.saturating_add(width) {
+                scroll.col = cur_x_position.saturating_sub(width).saturating_add(1);
+            // Use the saved line scroll to keep the cursor relative to the last time the
+            // user was on this line.
+            } else {
+                // Only if x is in the viewport of line_scroll_x but not within the viewport of scroll.x
+                // This prevents jumpy experience for a lot of tiny skips while moving vertically
+                scroll.col = line_scroll_x;
+            }
+
+            // Clamp scroll_x to the line's length so we never scroll past the visible content
+            let max_scroll_x = line_len.saturating_sub(width);
+            scroll.col = scroll.col.min(max_scroll_x);
+
+            // Persist the updated horizontal scroll state to the target line
+            if let Some(line) = self.buffer.lines.get_mut(clamped_y) {
+                line.scroll_x = scroll.col
+            }
         }
 
         // Apply the new scroll offset and mark dirty if the view changed
         self.scroll_offset = scroll;
-        self.modified = scroll.x != prev.x || scroll.y != prev.y;
+        self.modified = scroll.col != prev.col || scroll.row != prev.row;
     }
 
     pub fn set_location(&mut self, x: usize, y: usize) {

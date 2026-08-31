@@ -1,35 +1,88 @@
-use std::cmp::min;
+use crate::common::textfragment::{GraphemeWidth, TextFragment};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone)]
 pub struct Line {
-    string: String,
+    content: Vec<TextFragment>,
     pub scroll_x: usize,
 }
 impl Line {
     pub fn from(line_str: &str) -> Self {
+        let fragments = line_str
+            .graphemes(true)
+            .map(|grapheme| {
+                let unicode_width = grapheme.width();
+                let rendered_width = match unicode_width {
+                    0 | 1 => GraphemeWidth::Half,
+                    _ => GraphemeWidth::Full,
+                };
+
+                let replacement = match unicode_width {
+                    0 => Some('·'),
+                    _ => None,
+                };
+
+                TextFragment::from(grapheme, rendered_width, replacement)
+            })
+            .collect();
+
         Self {
-            string: String::from(line_str),
+            content: fragments,
             scroll_x: 0,
         }
     }
 
+    // Given a view offset x and a terminal width, returns
+    // the visible portion of the Line. If the start or end
+    // of the visible range cuts off a grapheme, the character
+    // U+2026 (…) replaces it.
     pub fn get(&self, range: Range<usize>) -> String {
-        let graphemes = self.string[..].graphemes(true).collect::<Vec<&str>>();
-        let graphemes_len = graphemes.len();
-        let start = min(range.start, graphemes_len);
-        let end = min(range.end, graphemes_len);
-
-        // If the range is completely out of bounds or inverted, return an empty string
-        if start >= end {
+        if self.content.is_empty() {
             return String::new();
         }
 
-        graphemes[start..end].concat()
+        let mut segment = String::from("");
+        let mut idx = 0; // track index of grapheme vector
+
+        // Skip past graphemes before the visible range
+        while idx < self.content.len() && self.width_until(idx) < range.start {
+            idx += 1;
+        }
+
+        // Truncation at range.start?
+        if idx > 0 && self.width_until(idx - 1) < range.start {
+            segment.push_str("…");
+            idx += 1;
+        }
+
+        // Add graphemes within the visible range
+        while idx < self.content.len() && self.width_until(idx + 1) <= range.end {
+            segment.push_str(&self.content[idx].grapheme);
+            idx += 1;
+        }
+
+        // Truncation at range.end?
+        if idx < self.content.len() && self.width_until(idx) > range.end {
+            segment.push_str("…");
+        }
+
+        segment
     }
 
-    pub fn len(&self) -> usize {
-        self.string[..].graphemes(true).count()
+    pub fn grapheme_count(&self) -> usize {
+        return self.content.len();
+    }
+
+    pub fn width_until(&self, grapheme_index: usize) -> usize {
+        self.content
+            .iter()
+            .take(grapheme_index)
+            .map(|fragment| match fragment.rendered_width {
+                GraphemeWidth::Half => 1,
+                GraphemeWidth::Full => 2,
+            })
+            .sum()
     }
 }

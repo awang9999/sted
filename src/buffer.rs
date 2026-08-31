@@ -1,4 +1,4 @@
-use crate::common::line::Line;
+use crate::common::{line::Line, types::Location};
 use std::fs::read_to_string;
 
 #[derive(Clone)]
@@ -40,5 +40,12 @@ impl Buffer {
             lines: lines,
             modified: true,
         })
+    }
+
+    pub fn get_col_from_text_location(&self, location: Location) -> usize {
+        if location.y >= self.lines.len() || self.lines.is_empty() {
+            return 0;
+        }
+        self.lines[location.y].width_until(location.x)
     }
 }
