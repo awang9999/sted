@@ -20,7 +20,7 @@ impl Line {
                 };
 
                 let replacement = match unicode_width {
-                    0 => Some('·'),
+                    0 => Some('·'.to_string()),
                     _ => None,
                 };
 
@@ -59,7 +59,7 @@ impl Line {
 
         // Add graphemes within the visible range
         while idx < self.content.len() && self.width_until(idx + 1) <= range.end {
-            segment.push_str(&self.content[idx].grapheme);
+            segment.push_str(&self.content[idx].get_display_text());
             idx += 1;
         }
 
