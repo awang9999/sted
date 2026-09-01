@@ -1,4 +1,7 @@
-use crate::common::textfragment::{GraphemeWidth, TextFragment};
+use crate::common::{
+    constants::TAB_WIDTH_SPACES,
+    textfragment::{GraphemeWidth, TextFragment},
+};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -19,17 +22,43 @@ impl Line {
                     _ => GraphemeWidth::Full,
                 };
 
-                let replacement = match unicode_width {
-                    0 => Some('·'.to_string()),
-                    _ => None,
-                };
-
+                let replacement = Line::replacement_character(grapheme);
                 TextFragment::from(grapheme, rendered_width, replacement)
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        // Merge fragments that form a compound emoji via U+200D.
+        let mut merged: Vec<TextFragment> = Vec::with_capacity(fragments.len());
+        let mut i = 0;
+        while i < fragments.len() {
+            let mut current = fragments[i].clone();
+            while i + 1 < fragments.len()
+                && (fragments[i].grapheme.ends_with('\u{200d}')
+                    || fragments[i + 1].grapheme.starts_with('\u{200d}'))
+            {
+                let next_str = &fragments[i + 1].grapheme;
+                let combined_str = format!("{}{}", current.grapheme, next_str);
+
+                let width = UnicodeWidthStr::width(combined_str.as_str());
+                let rendered_width = if width > 1 {
+                    GraphemeWidth::Full
+                } else {
+                    GraphemeWidth::Half
+                };
+                let replacement = Line::replacement_character(combined_str.as_str());
+
+                current.grapheme = combined_str;
+                current.rendered_width = rendered_width;
+                current.replacement = replacement;
+
+                i += 1; // skip merged fragment
+            }
+            merged.push(current);
+            i += 1;
+        }
 
         Self {
-            content: fragments,
+            content: merged,
             scroll_x: 0,
         }
     }
@@ -84,5 +113,20 @@ impl Line {
                 GraphemeWidth::Full => 2,
             })
             .sum()
+    }
+
+    fn replacement_character(for_str: &str) -> Option<String> {
+        let width = for_str.width();
+        match for_str {
+            // Spaces get rendered as spaces
+            " " => None,
+            // Tabs get rendered as spaces
+            "\t" => Some(" ".repeat(TAB_WIDTH_SPACES)),
+            // Any visible whitespace characters besides spaces and tabs
+            _ if width > 0 && for_str.trim().is_empty() => Some('␣'.to_string()),
+            // Control characters (one or more consecutive)
+            _ if for_str.chars().all(|c| c.is_control()) => Some('▯'.to_string()),
+            _ => None,
+        }
     }
 }
