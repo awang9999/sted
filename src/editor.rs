@@ -84,7 +84,7 @@ impl Editor {
                 Err(err) => {
                     #[cfg(debug_assertions)]
                     {
-                        panic!("Could not handle command: {err}");
+                        print!("Could not handle command: {err}");
                     }
                 }
             }

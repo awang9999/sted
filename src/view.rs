@@ -51,6 +51,7 @@ impl View {
         match event {
             EditorCommand::Resize(size) => self.resize(size),
             EditorCommand::Move(direction) => self.move_location(direction),
+            EditorCommand::Insert(c) => self.handle_insert(c),
             EditorCommand::Quit => (),
         };
     }
@@ -279,5 +280,11 @@ impl View {
 
     pub fn set_location_coord(&mut self, pos: Location) {
         self.location = pos
+    }
+
+    fn handle_insert(&mut self, c: char) {
+        self.buffer.insert(self.location, c);
+        self.set_location(self.location.x + 1, self.location.y);
+        self.modified = true;
     }
 }

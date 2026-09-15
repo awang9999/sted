@@ -48,4 +48,14 @@ impl Buffer {
         }
         self.lines[location.y].width_until(location.x)
     }
+
+    pub fn insert(&mut self, location: Location, c: char) {
+        if location.y >= self.lines.len() {
+            self.lines.push(Line::from(&format!("{c}")));
+        } else {
+            let line = self.lines.get_mut(location.y);
+            line.expect("Expect 0 <=location.y < self.lines.len()")
+                .insert_char(location.x, c);
+        }
+    }
 }

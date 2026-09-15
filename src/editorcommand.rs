@@ -17,6 +17,7 @@ pub enum Direction {
 pub enum EditorCommand {
     Move(Direction),
     Resize(Size),
+    Insert(char),
     Quit,
 }
 
@@ -28,15 +29,20 @@ impl TryFrom<Event> for EditorCommand {
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => match (code, modifiers) {
+                // Program control
                 (KeyCode::Char('q'), KeyModifiers::CONTROL) => Ok(Self::Quit),
-                (KeyCode::Up, _) => Ok(Self::Move(Direction::Up)),
-                (KeyCode::Down, _) => Ok(Self::Move(Direction::Down)),
-                (KeyCode::Left, _) => Ok(Self::Move(Direction::Left)),
-                (KeyCode::Right, _) => Ok(Self::Move(Direction::Right)),
-                (KeyCode::PageDown, _) => Ok(Self::Move(Direction::PageDown)),
-                (KeyCode::PageUp, _) => Ok(Self::Move(Direction::PageUp)),
-                (KeyCode::Home, _) => Ok(Self::Move(Direction::Home)),
-                (KeyCode::End, _) => Ok(Self::Move(Direction::End)),
+                // Caret movement
+                (KeyCode::Up, KeyModifiers::NONE) => Ok(Self::Move(Direction::Up)),
+                (KeyCode::Down, KeyModifiers::NONE) => Ok(Self::Move(Direction::Down)),
+                (KeyCode::Left, KeyModifiers::NONE) => Ok(Self::Move(Direction::Left)),
+                (KeyCode::Right, KeyModifiers::NONE) => Ok(Self::Move(Direction::Right)),
+                (KeyCode::PageDown, KeyModifiers::NONE) => Ok(Self::Move(Direction::PageDown)),
+                (KeyCode::PageUp, KeyModifiers::NONE) => Ok(Self::Move(Direction::PageUp)),
+                (KeyCode::Home, KeyModifiers::NONE) => Ok(Self::Move(Direction::Home)),
+                (KeyCode::End, KeyModifiers::NONE) => Ok(Self::Move(Direction::End)),
+                // Ordinary presses
+                (KeyCode::Char(c), KeyModifiers::NONE) => Ok(Self::Insert(c)),
+                (KeyCode::Char(c), KeyModifiers::SHIFT) => Ok(Self::Insert(c)),
                 _ => Err(format!("Key Code not supported: {code:?}")),
             },
             Event::Resize(width_u16, height_u16) => {
