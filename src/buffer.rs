@@ -49,13 +49,32 @@ impl Buffer {
         self.lines[location.y].width_until(location.x)
     }
 
+    // Inserts a character at the caret position. Moves the caret one to the right
+    // If the caret is at the bottom of the doc, create a new line and then add the character.
     pub fn insert(&mut self, location: Location, c: char) {
         if location.y >= self.lines.len() {
             self.lines.push(Line::from(&format!("{c}")));
+        } else if let Some(line) = self.lines.get_mut(location.y) {
+            line.insert_char(location.x, c);
+        }
+    }
+
+    pub fn newline(&mut self, location: Location) {
+        if location.y >= self.lines.len() {
+            self.lines.push(Line::newline());
+        }
+
+        let str_before_caret = self.lines[location.y].convert_content_to_string(0..location.x);
+        let str_after_caret = self.lines[location.y]
+            .convert_content_to_string(location.x..self.lines[location.y].grapheme_count());
+
+        self.lines[location.y] = Line::from(&str_before_caret);
+
+        if location.y + 1 >= self.lines.len() {
+            self.lines.push(Line::from(&str_after_caret));
         } else {
-            let line = self.lines.get_mut(location.y);
-            line.expect("Expect 0 <=location.y < self.lines.len()")
-                .insert_char(location.x, c);
+            self.lines
+                .insert(location.y + 1, Line::from(&str_after_caret));
         }
     }
 }

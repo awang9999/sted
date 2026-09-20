@@ -52,6 +52,7 @@ impl View {
             EditorCommand::Resize(size) => self.resize(size),
             EditorCommand::Move(direction) => self.move_location(direction),
             EditorCommand::Insert(c) => self.handle_insert(c),
+            EditorCommand::NewLine => self.handle_newline(),
             EditorCommand::Quit => (),
         };
     }
@@ -282,9 +283,22 @@ impl View {
         self.location = pos
     }
 
+    // Insert a character and move the caret to the position after it.
+    // Force a re-render
     fn handle_insert(&mut self, c: char) {
         self.buffer.insert(self.location, c);
         self.set_location(self.location.x + 1, self.location.y);
+        self.scroll_location_into_view();
+        self.modified = true;
+    }
+
+    // Inserts a line below the caret position
+    // Force a re-render
+    fn handle_newline(&mut self) {
+        self.buffer.newline(self.location);
+        self.set_location(0, self.location.y + 1);
+        self.desired_x = 0;
+        self.scroll_location_into_view();
         self.modified = true;
     }
 }

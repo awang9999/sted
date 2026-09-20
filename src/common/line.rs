@@ -12,6 +12,13 @@ pub struct Line {
     pub scroll_x: usize,
 }
 impl Line {
+    pub fn newline() -> Self {
+        Self {
+            content: Self::convert_string_to_content(""),
+            scroll_x: 0,
+        }
+    }
+
     pub fn from(line_str: &str) -> Self {
         let content = Self::convert_string_to_content(line_str);
 
@@ -19,6 +26,15 @@ impl Line {
             content: content,
             scroll_x: 0,
         }
+    }
+
+    pub fn convert_content_to_string(&self, range: Range<usize>) -> String {
+        self.content[range]
+            .iter()
+            .fold(String::new(), |mut acc, fragment| {
+                acc.push_str(&fragment.grapheme);
+                acc
+            })
     }
 
     fn convert_string_to_content(line_str: &str) -> Vec<TextFragment> {
@@ -78,7 +94,7 @@ impl Line {
             return String::new();
         }
 
-        let mut segment = String::from("");
+        let mut segment = String::new();
         let mut idx = 0; // track index of grapheme vector
 
         // Skip past graphemes before the visible range
@@ -142,17 +158,16 @@ impl Line {
     // finally appends the rest of the line. Lastly, it
     // reconstructs the internal line data structure for itself.
     pub fn insert_char(&mut self, grapheme_index: usize, c: char) {
-        let mut result = String::from("");
+        let mut result = String::new();
         let mut idx = 0; // track index of grapheme vector
 
         // Build string using the TextFragment graphemes up to the insertion index
-        while idx < grapheme_index {
+        while idx < grapheme_index && idx < self.content.len() {
             result.push_str(&self.content[idx].grapheme);
             idx += 1;
         }
 
         result.push_str(&format!("{c}"));
-        idx += 1;
 
         // insert remaining TextFragments as graphemes
         while idx < self.content.len() {

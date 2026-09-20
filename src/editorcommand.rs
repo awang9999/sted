@@ -18,6 +18,7 @@ pub enum EditorCommand {
     Move(Direction),
     Resize(Size),
     Insert(char),
+    NewLine,
     Quit,
 }
 
@@ -41,8 +42,9 @@ impl TryFrom<Event> for EditorCommand {
                 (KeyCode::Home, KeyModifiers::NONE) => Ok(Self::Move(Direction::Home)),
                 (KeyCode::End, KeyModifiers::NONE) => Ok(Self::Move(Direction::End)),
                 // Ordinary presses
-                (KeyCode::Char(c), KeyModifiers::NONE) => Ok(Self::Insert(c)),
-                (KeyCode::Char(c), KeyModifiers::SHIFT) => Ok(Self::Insert(c)),
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => Ok(Self::Insert(c)),
+                // Enter
+                (KeyCode::Enter, KeyModifiers::NONE) => Ok(Self::NewLine),
                 _ => Err(format!("Key Code not supported: {code:?}")),
             },
             Event::Resize(width_u16, height_u16) => {
