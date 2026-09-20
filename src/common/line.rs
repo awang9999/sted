@@ -177,4 +177,75 @@ impl Line {
 
         self.content = Self::convert_string_to_content(&result);
     }
+
+    /// Removes the grapheme cluster at `grapheme_index` from this line's content.
+    pub fn delete_grapheme(&mut self, grapheme_index: usize) {
+        if grapheme_index >= self.content.len() {
+            return;
+        };
+        self.content.remove(grapheme_index);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_grapheme_removes_correct_grapheme() {
+        let mut line = Line::from("hello");
+        assert_eq!(line.grapheme_count(), 5);
+
+        line.delete_grapheme(2); // removes 'l'
+        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "helo");
+    }
+
+    #[test]
+    fn delete_grapheme_at_start_and_end() {
+        let mut line = Line::from("abc");
+
+        line.delete_grapheme(0); // remove 'a'
+        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "bc");
+
+        let mut line = Line::from("abc");
+        line.delete_grapheme(2); // remove 'c' — left with ["a", "b"]
+        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "ab");
+
+        // On the same line, delete at index 0 removes 'a', leaving ['b']
+        line.delete_grapheme(0);
+        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "b");
+    }
+
+    #[test]
+    fn delete_grapheme_out_of_bounds_is_noop() {
+        let mut line = Line::from("abcd");
+        let original_count = line.grapheme_count();
+
+        // Index 4 is past the end (valid indices are 0..3)
+        line.delete_grapheme(4);
+        assert_eq!(line.grapheme_count(), original_count);
+
+        line.delete_grapheme(100);
+        assert_eq!(line.grapheme_count(), original_count);
+    }
+
+    #[test]
+    fn delete_grapheme_empty_line_is_noop() {
+        let mut line = Line::from("");
+        line.delete_grapheme(0);
+        assert_eq!(line.content.len(), 0);
+    }
+
+    #[test]
+    fn delete_grapheme_removes_whole_emoji_grapheme() {
+        // Family emoji uses a ZWJ sequence; convert_string_to_content merges
+        // it into a single TextFragment.  Deleting at any index that would
+        // land in the middle shouldn't happen because the whole fragment is
+        // one grapheme, but deleting the fragment itself should work.
+        let mut line = Line::from("👨‍👩‍👧");
+        assert!(line.grapheme_count() >= 1);
+
+        line.delete_grapheme(0);
+        assert_eq!(line.content.len(), 0);
+    }
 }

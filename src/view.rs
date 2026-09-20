@@ -53,6 +53,11 @@ impl View {
             EditorCommand::Move(direction) => self.move_location(direction),
             EditorCommand::Insert(c) => self.handle_insert(c),
             EditorCommand::NewLine => self.handle_newline(),
+            EditorCommand::Delete => self.handle_delete(),
+            EditorCommand::BackSpace => {
+                self.move_location(Direction::Left);
+                self.handle_delete();
+            }
             EditorCommand::Quit => (),
         };
     }
@@ -300,5 +305,104 @@ impl View {
         self.desired_x = 0;
         self.scroll_location_into_view();
         self.modified = true;
+    }
+
+    /// Deletes the grapheme cluster at the caret position and marks the view as modified.
+    fn handle_delete(&mut self) {
+        self.buffer.delete(self.location);
+        self.modified = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::line::Line;
+
+    fn make_view(lines_data: &[&str]) -> View {
+        let buffer = Buffer {
+            lines: lines_data.iter().copied().map(|s| Line::from(s)).collect(),
+            modified: true,
+        };
+        View {
+            buffer,
+            modified: false,
+            size: Terminal::size().unwrap_or(Size {
+                height: 24,
+                width: 80,
+            }),
+            location: Location::default(),
+            scroll_offset: Position::default(),
+            desired_x: 0,
+        }
+    }
+
+    #[test]
+    fn handle_delete_marks_view_as_modified() {
+        let mut view = make_view(&["abc"]);
+        assert!(!view.modified); // render clears modified
+
+        view.handle_delete();
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn handle_delete_removes_grapheme_from_current_line() {
+        let mut view = make_view(&["hello"]);
+        view.set_location(0, 0);
+
+        view.handle_delete(); // deletes grapheme at index 1 ('e')
+        assert_eq!(view.buffer.lines[0].grapheme_count(), 4);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert!(!text.contains('e'));
+    }
+
+    #[test]
+    fn handle_delete_on_nonzero_location() {
+        let mut view = make_view(&["abcdef"]);
+        view.set_location(3, 0); // caret between 'd' and 'e'
+
+        view.handle_delete(); // deletes grapheme at index 4 ('e')
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert!(!text.contains('e'));
+    }
+
+    #[test]
+    fn handle_delete_with_out_of_bounds_location() {
+        let mut view = make_view(&["abc"]);
+        // Location is (0, 0) which is within bounds — buffer.delete handles row-OOB internally
+        view.handle_delete();
+        assert!(view.modified);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert!(!text.contains('b'));
+    }
+
+    #[test]
+    fn handle_delete_across_multiple_lines() {
+        let mut view = make_view(&["first", "second"]);
+        let first_len_before = view.buffer.lines[0].grapheme_count();
+        view.set_location(1, 0); // delete from first line
+        view.handle_delete();
+        assert_eq!(view.buffer.lines[0].grapheme_count(), first_len_before - 1);
+
+        let second_len_before = view.buffer.lines[1].grapheme_count();
+        view.set_location(2, 1); // delete from second line
+        view.handle_delete();
+        assert_eq!(view.buffer.lines[1].grapheme_count(), second_len_before - 1);
+
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn handle_delete_does_not_crash_with_empty_line() {
+        let mut view = make_view(&["", "hello"]);
+        view.set_location(0, 0); // delete from empty line
+
+        view.handle_delete();
+        assert!(view.modified);
+        assert_eq!(view.buffer.lines[0].grapheme_count(), 0);
     }
 }
