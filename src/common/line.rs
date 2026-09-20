@@ -152,11 +152,7 @@ impl Line {
         }
     }
 
-    // Given the insertion index and character, this function
-    // builds a string using the TextFragments from the line up
-    // to the insertion index, appends the character, then
-    // finally appends the rest of the line. Lastly, it
-    // reconstructs the internal line data structure for itself.
+    /// Inserts character `c` at `grapheme_index`, shifting all subsequent graphemes right.
     pub fn insert_char(&mut self, grapheme_index: usize, c: char) {
         let mut result = String::new();
         let mut idx = 0; // track index of grapheme vector
@@ -197,7 +193,10 @@ mod tests {
         assert_eq!(line.grapheme_count(), 5);
 
         line.delete_grapheme(2); // removes 'l'
-        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "helo");
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "helo"
+        );
     }
 
     #[test]
@@ -205,15 +204,24 @@ mod tests {
         let mut line = Line::from("abc");
 
         line.delete_grapheme(0); // remove 'a'
-        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "bc");
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "bc"
+        );
 
         let mut line = Line::from("abc");
         line.delete_grapheme(2); // remove 'c' — left with ["a", "b"]
-        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "ab");
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "ab"
+        );
 
         // On the same line, delete at index 0 removes 'a', leaving ['b']
         line.delete_grapheme(0);
-        assert_eq!(line.convert_content_to_string(0..line.grapheme_count()), "b");
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "b"
+        );
     }
 
     #[test]
@@ -247,5 +255,148 @@ mod tests {
 
         line.delete_grapheme(0);
         assert_eq!(line.content.len(), 0);
+    }
+
+    #[test]
+    fn insert_char_at_beginning() {
+        let mut line = Line::from("bc");
+        line.insert_char(0, 'a');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn insert_char_in_middle() {
+        let mut line = Line::from("ac");
+        line.insert_char(1, 'b');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn insert_char_at_end() {
+        let mut line = Line::from("ab");
+        line.insert_char(2, 'c');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn insert_char_into_empty_line() {
+        let mut line = Line::from("");
+        line.insert_char(0, 'x');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "x"
+        );
+        assert_eq!(line.grapheme_count(), 1);
+    }
+
+    #[test]
+    fn insert_char_out_of_bounds_pushes_at_end() {
+        let mut line = Line::from("abc");
+        // Insert past the end — should still append at EOF
+        line.insert_char(10, 'z');
+        assert_eq!(line.grapheme_count(), 4);
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abcz"
+        );
+    }
+
+    #[test]
+    fn insert_char_into_empty_line_out_of_bounds() {
+        let mut line = Line::from("");
+        // Empty line: index 5 is out of bounds, should still work
+        line.insert_char(5, 'w');
+        assert_eq!(line.grapheme_count(), 1);
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "w"
+        );
+    }
+
+    #[test]
+    fn insert_char_multiple_times_preserves_order() {
+        let mut line = Line::from("");
+        line.insert_char(0, 'c');
+        line.insert_char(0, 'b');
+        line.insert_char(0, 'a');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn insert_char_preserves_existing_graphemes() {
+        let mut line = Line::from("hello");
+        line.insert_char(3, 'X');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "helXlo"
+        );
+
+        // Verify remaining graphemes are intact
+        line.insert_char(6, 'Y');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "helXloY"
+        );
+    }
+
+    #[test]
+    fn insert_char_with_emoji() {
+        let mut line = Line::from("ab");
+        line.insert_char(1, '👍');
+        let text = line.convert_content_to_string(0..line.grapheme_count());
+        assert!(text.contains('👍'));
+        assert_eq!(line.grapheme_count(), 3);
+    }
+
+    #[test]
+    fn insert_char_at_beginning_of_emoji_line() {
+        let mut line = Line::from("👍bc");
+        line.insert_char(0, 'a');
+        let text = line.convert_content_to_string(0..line.grapheme_count());
+        assert!(text.starts_with('a'));
+        assert_eq!(line.grapheme_count(), 4);
+    }
+
+    #[test]
+    fn insert_char_between_two_emoji() {
+        let mut line = Line::from("👍🎉");
+        line.insert_char(1, 'x');
+        let text = line.convert_content_to_string(0..line.grapheme_count());
+        assert_eq!(text, "👍x🎉");
+        assert_eq!(line.grapheme_count(), 3);
+    }
+
+    #[test]
+    fn insert_char_repeatedly_at_same_position() {
+        let mut line = Line::from("abc");
+        for i in 0..5 {
+            line.insert_char(1, char::from_digit(i, 10).unwrap());
+        }
+        let text = line.convert_content_to_string(0..line.grapheme_count());
+        // Each insertion at index 1 pushes the previous inserted characters right
+        assert_eq!(text, "a43210bc");
+    }
+
+    #[test]
+    fn insert_char_into_line_with_empty_graphemes() {
+        // Insert between two normal chars on any existing grapheme count
+        let mut line = Line::from("hello");
+        line.insert_char(0, 'H');
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "Hhello"
+        );
     }
 }

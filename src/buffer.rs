@@ -49,9 +49,8 @@ impl Buffer {
         self.lines[location.y].width_until(location.x)
     }
 
-    // Inserts a character at the caret position. Moves the caret one to the right
-    // If the caret is at the bottom of the doc, create a new line and then add the character.
-    pub fn insert(&mut self, location: Location, c: char) {
+    /// Inserts character `c` at column `location.x` on row `location.y`. Creates a new line if the row exceeds the buffer length.
+    pub fn insert_char(&mut self, location: Location, c: char) {
         if location.y >= self.lines.len() {
             self.lines.push(Line::from(&format!("{c}")));
         } else if let Some(line) = self.lines.get_mut(location.y) {
@@ -115,7 +114,10 @@ mod tests {
         let mut buf = make_buffer(&["abcd"]);
         // Location (0, 0) → deletes grapheme at index 1 from line[0] ('b')
         buf.delete(Location { x: 0, y: 0 });
-        assert_eq!(buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])), "acd");
+        assert_eq!(
+            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            "acd"
+        );
     }
 
     #[test]
@@ -123,7 +125,10 @@ mod tests {
         let mut buf = make_buffer(&["abcdef"]);
         // Location (2, 0) → deletes grapheme at index 3 from line[0] ('d')
         buf.delete(Location { x: 2, y: 0 });
-        assert_eq!(buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])), "abcef");
+        assert_eq!(
+            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            "abcef"
+        );
     }
 
     #[test]
@@ -131,7 +136,10 @@ mod tests {
         let mut buf = make_buffer(&["abc"]);
         // Location (1, 0) → deletes grapheme at index 2 ('c')
         buf.delete(Location { x: 1, y: 0 });
-        assert_eq!(buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])), "ab");
+        assert_eq!(
+            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            "ab"
+        );
     }
 
     #[test]
@@ -162,10 +170,124 @@ mod tests {
     fn delete_across_multiple_lines() {
         let mut buf = make_buffer(&["hello", "world"]);
         buf.delete(Location { x: 0, y: 0 }); // deletes from first line
-        assert_eq!(buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])), "hllo");
+        assert_eq!(
+            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            "hllo"
+        );
 
         let second_before = buf.lines[1].grapheme_count();
         buf.delete(Location { x: 2, y: 1 }); // deletes from second line
         assert_eq!(buf.lines[1].grapheme_count(), second_before - 1);
     }
+
+    #[test]
+    fn insert_char_on_empty_buffer_creates_new_line() {
+        let mut buf = Buffer::default();
+        assert!(buf.lines.is_empty());
+
+        buf.insert_char(Location { x: 0, y: 0 }, 'x');
+        assert_eq!(buf.lines.len(), 1);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(text, "x");
+    }
+
+    #[test]
+    fn insert_char_into_existing_row() {
+        let mut buf = make_buffer(&["abc"]);
+
+        buf.insert_char(Location { x: 2, y: 0 }, 'X');
+        assert_eq!(buf.lines[0].grapheme_count(), 4);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(text, "abXc");
+    }
+
+    #[test]
+    fn insert_char_at_beginning_of_line() {
+        let mut buf = make_buffer(&["hello"]);
+
+        buf.insert_char(Location { x: 0, y: 0 }, 'W');
+        assert_eq!(buf.lines[0].grapheme_count(), 6);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(text, "Whello");
+    }
+
+    #[test]
+    fn insert_char_at_end_of_existing_line() {
+        let mut buf = make_buffer(&["hello"]);
+        let len_before = buf.lines[0].grapheme_count();
+
+        // insert at the end (x == length of line)
+        buf.insert_char(
+            Location {
+                x: len_before,
+                y: 0,
+            },
+            '!',
+        );
+        assert_eq!(buf.lines[0].grapheme_count(), len_before + 1);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(text, "hello!");
+    }
+
+    #[test]
+    fn insert_char_appends_when_row_does_not_exist() {
+        let mut buf = make_buffer(&["abc", "def"]);
+
+        // row 2 does not exist — should create a new line as the third element
+        buf.insert_char(Location { x: 0, y: 3 }, 'x');
+        assert_eq!(buf.lines.len(), 3);
+    }
+
+    #[test]
+    fn insert_char_in_middle_of_existing_line_preserves_others() {
+        let mut buf = make_buffer(&["abc", "middle", "last"]);
+        let first_before = buf.lines[0].grapheme_count();
+        let third_before = buf.lines[2].grapheme_count();
+
+        buf.insert_char(Location { x: 1, y: 1 }, 'X');
+
+        // only the target line changes length
+        assert_eq!(buf.lines[1].grapheme_count(), 6 + 1);
+        assert_eq!(buf.lines[0].grapheme_count(), first_before);
+        assert_eq!(buf.lines[2].grapheme_count(), third_before);
+    }
+
+    #[test]
+    fn insert_char_does_nothing_out_of_bounds_row_when_buffer_empty() {
+        let mut buf = Buffer::default();
+
+        // y=5, buffer is empty (len=0), so location.y >= lines.len → creates a new line!
+        buf.insert_char(Location { x: 0, y: 5 }, 'x');
+        assert_eq!(buf.lines.len(), 1);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(text, "x");
+    }
+
+    #[test]
+    fn insert_char_with_special_characters() {
+        let mut buf = make_buffer(&["abc"]);
+
+        // Insert an emoji grapheme
+        buf.insert_char(Location { x: 2, y: 0 }, '👍');
+        assert_eq!(buf.lines[0].grapheme_count(), 4);
+        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert!(text.contains("👍"));
+    }
+
+    #[test]
+    fn insert_char_into_empty_line() {
+        let mut buf = make_buffer(&["", "abc"]);
+
+        // Insert into the empty first line; the other line must be untouched
+        buf.insert_char(Location { x: 0, y: 0 }, 'Z');
+        assert_eq!(buf.lines.len(), 2);
+        let first: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        assert_eq!(first, "Z");
+        let second: String = buf.lines[1].convert_content_to_string(0..buf.lines[1].grapheme_count());
+        assert_eq!(second, "abc");
+    }
+
+    // Note: insert_char does NOT silently ignore out-of-bounds. Instead:
+    // - When `location.y >= lines.len()` it *creates* a new line at that index.
+    // - The Line::insert_char inside gets x past the end of the line, which is okay (inserts at EOF).
 }

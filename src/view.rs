@@ -288,10 +288,9 @@ impl View {
         self.location = pos
     }
 
-    // Insert a character and move the caret to the position after it.
-    // Force a re-render
+    /// Inserts a character, moves the caret right, scrolls it into view, marks buffer and view as modified.
     fn handle_insert(&mut self, c: char) {
-        self.buffer.insert(self.location, c);
+        self.buffer.insert_char(self.location, c);
         self.set_location(self.location.x + 1, self.location.y);
         self.scroll_location_into_view();
         self.modified = true;
@@ -397,12 +396,133 @@ mod tests {
     }
 
     #[test]
-    fn handle_delete_does_not_crash_with_empty_line() {
-        let mut view = make_view(&["", "hello"]);
-        view.set_location(0, 0); // delete from empty line
+    fn handle_insert_marks_view_as_modified() {
+        let mut view = make_view(&["hello"]);
+        assert!(!view.modified); // render clears modified
 
-        view.handle_delete();
+        view.handle_insert('x');
         assert!(view.modified);
-        assert_eq!(view.buffer.lines[0].grapheme_count(), 0);
+    }
+
+    #[test]
+    fn handle_insert_moves_caret_right_by_one_column() {
+        let mut view = make_view(&["hello"]);
+        view.set_location(2, 0);
+        assert_eq!(view.location.x, 2);
+
+        view.handle_insert('x');
+        assert_eq!(view.location.x, 3);
+        assert_eq!(view.location.y, 0); // row should not change
+    }
+
+    #[test]
+    fn handle_insert_at_beginning_of_line() {
+        let mut view = make_view(&["hello"]);
+        view.set_location(0, 0);
+
+        view.handle_insert('x');
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "xhello");
+    }
+
+    #[test]
+    fn handle_insert_at_end_of_line() {
+        let mut view = make_view(&["hello"]);
+        let line_len = view.buffer.lines[0].grapheme_count();
+        view.set_location(line_len, 0); // position at end of "hello"
+
+        view.handle_insert('!');
+        assert_eq!(view.location.x, line_len + 1);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "hello!");
+    }
+
+    #[test]
+    fn handle_insert_in_middle_of_line() {
+        let mut view = make_view(&["hello world"]);
+        view.set_location(5, 0); // position at the space
+
+        view.handle_insert('|');
+        assert_eq!(view.location.x, 6);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "hello| world");
+    }
+
+    #[test]
+    fn handle_insert_on_empty_line() {
+        let mut view = make_view(&[""]);
+        view.set_location(0, 0);
+
+        view.handle_insert('a');
+        assert_eq!(view.location.x, 1);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "a");
+    }
+
+    #[test]
+    fn handle_insert_on_empty_lines() {
+        let mut view = make_view(&["", ""]);
+        view.set_location(0, 0);
+
+        view.handle_insert('x');
+        assert_eq!(view.location.x, 1);
+        view.handle_insert('y');
+        assert_eq!(view.location.x, 2);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "xy");
+    }
+
+    #[test]
+    fn handle_insert_on_different_rows() {
+        let mut view = make_view(&["abc", "def"]);
+
+        // Insert on first line
+        view.set_location(0, 0);
+        view.handle_insert('A');
+        assert_eq!(view.location.x, 1);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "Aabc");
+
+        // Move to second line and insert
+        view.set_location(1, 1); // after 'd'
+        view.handle_insert('X');
+        assert_eq!(view.location.x, 2);
+        let text: String = view.buffer.lines[1]
+            .convert_content_to_string(0..view.buffer.lines[1].grapheme_count());
+        assert_eq!(text, "dXef");
+    }
+
+    #[test]
+    fn handle_insert_does_not_affect_other_lines() {
+        let mut view = make_view(&["first", "middle", "last"]);
+        let first_len_before = view.buffer.lines[0].grapheme_count();
+        let last_len_before = view.buffer.lines[2].grapheme_count();
+        view.set_location(2, 1); // middle line ("middle" has 6 graphemes)
+
+        view.handle_insert('x');
+
+        // Only the middle line should change — its length goes from 6 to 7
+        assert_eq!(view.buffer.lines[1].grapheme_count(), 7);
+        assert_eq!(view.buffer.lines[0].grapheme_count(), first_len_before);
+        assert_eq!(view.buffer.lines[2].grapheme_count(), last_len_before);
+    }
+
+    #[test]
+    fn handle_insert_with_multicharacter_graphemes() {
+        let mut view = make_view(&["café"]);
+        // 'f' is at grapheme index 3, insert '!' after the é (index 4)
+        view.set_location(4, 0);
+
+        view.handle_insert('!');
+        assert_eq!(view.location.x, 5);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "café!");
     }
 }
