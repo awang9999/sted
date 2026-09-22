@@ -54,10 +54,7 @@ impl View {
             EditorCommand::Insert(c) => self.handle_insert(c),
             EditorCommand::NewLine => self.handle_newline(),
             EditorCommand::Delete => self.handle_delete(),
-            EditorCommand::BackSpace => {
-                self.move_location(Direction::Left);
-                self.handle_delete();
-            }
+            EditorCommand::BackSpace => self.handle_backspace(),
             EditorCommand::Quit => (),
         };
     }
@@ -311,6 +308,30 @@ impl View {
         self.buffer.delete(self.location);
         self.modified = true;
     }
+
+    fn handle_backspace(&mut self) {
+        // back space should do nothing if the caret is at the top left of the buffer
+        if self.location.y <= 0 && self.location.x <= 0 {
+            return;
+        }
+        // Back space at the beginning of a line should move the caret to the end of the
+        // previous line and append the contents of it's line to the previous line
+        // The mechanism for this will be to rebuild the previous line from the grapheme
+        // strings of both lines.
+        else if self.location.x <= 0 {
+            let curr_y = self.location.y;
+            let target_y = self.location.y - 1;
+            self.move_location(Direction::Left);
+            self.buffer.consolidate_lines(curr_y, target_y);
+            self.modified = true;
+        }
+        // If not at the beginning of a line, backspace should move the caret one to the
+        // left and then delete the character to its right.
+        else {
+            self.move_location(Direction::Left);
+            self.handle_delete();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -350,11 +371,11 @@ mod tests {
         let mut view = make_view(&["hello"]);
         view.set_location(0, 0);
 
-        view.handle_delete(); // deletes grapheme at index 1 ('e')
+        view.handle_delete(); // deletes grapheme at index 0 ('h')
         assert_eq!(view.buffer.lines[0].grapheme_count(), 4);
         let text: String = view.buffer.lines[0]
             .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
-        assert!(!text.contains('e'));
+        assert!(!text.contains('h'));
     }
 
     #[test]
@@ -362,10 +383,10 @@ mod tests {
         let mut view = make_view(&["abcdef"]);
         view.set_location(3, 0); // caret between 'd' and 'e'
 
-        view.handle_delete(); // deletes grapheme at index 4 ('e')
+        view.handle_delete(); // deletes grapheme at index 3 ('d')
         let text: String = view.buffer.lines[0]
             .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
-        assert!(!text.contains('e'));
+        assert!(!text.contains('d'));
     }
 
     #[test]
@@ -376,7 +397,7 @@ mod tests {
         assert!(view.modified);
         let text: String = view.buffer.lines[0]
             .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
-        assert!(!text.contains('b'));
+        assert!(!text.contains('a'));
     }
 
     #[test]
@@ -393,6 +414,65 @@ mod tests {
         assert_eq!(view.buffer.lines[1].grapheme_count(), second_len_before - 1);
 
         assert!(view.modified);
+    }
+
+    #[test]
+    fn backspace_at_beginning_of_line_merges_with_previous() {
+        let mut view = make_view(&["ab", "cd"]);
+        view.set_location(0, 1);
+
+        view.handle_backspace();
+
+        assert_eq!(view.buffer.lines.len(), 1);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "abcd");
+        // caret lands at the end of the previous line
+        assert_eq!((view.location.x, view.location.y), (2, 0));
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn backspace_at_first_line_starts_nothing() {
+        let mut view = make_view(&["ab"]);
+        view.set_location(0, 0);
+
+        view.handle_backspace();
+
+        assert_eq!(view.buffer.lines.len(), 1);
+        assert_eq!(
+            view.buffer.lines[0]
+                .convert_content_to_string(0..view.buffer.lines[0].grapheme_count()),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn backspace_with_empty_previous_line_keeps_content() {
+        let mut view = make_view(&["", "cd"]);
+        view.set_location(0, 1);
+
+        view.handle_backspace();
+
+        assert_eq!(view.buffer.lines.len(), 1);
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "cd");
+        // caret lands at the end of the (empty) previous line
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn backspace_mid_line_deletes_left_grapheme() {
+        let mut view = make_view(&["abcd"]);
+        view.set_location(2, 0);
+
+        view.handle_backspace();
+
+        let text: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(text, "acd");
+        assert_eq!((view.location.x, view.location.y), (1, 0));
     }
 
     #[test]

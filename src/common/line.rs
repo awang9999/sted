@@ -28,6 +28,11 @@ impl Line {
         }
     }
 
+    /// Appends the content of `other` to this line, keeping this line's existing content first.
+    pub fn append(&mut self, other: Self) {
+        self.content.extend(other.content);
+    }
+
     pub fn convert_content_to_string(&self, range: Range<usize>) -> String {
         self.content[range]
             .iter()
