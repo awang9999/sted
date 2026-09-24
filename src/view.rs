@@ -310,27 +310,26 @@ impl View {
     }
 
     fn handle_backspace(&mut self) {
-        // back space should do nothing if the caret is at the top left of the buffer
-        if self.location.y <= 0 && self.location.x <= 0 {
+        let Location { x, y } = self.location;
+
+        // No-op at the very start of the buffer.
+        if x == 0 && y == 0 {
             return;
         }
-        // Back space at the beginning of a line should move the caret to the end of the
-        // previous line and append the contents of it's line to the previous line
-        // The mechanism for this will be to rebuild the previous line from the grapheme
-        // strings of both lines.
-        else if self.location.x <= 0 {
-            let curr_y = self.location.y;
-            let target_y = self.location.y - 1;
-            self.move_location(Direction::Left);
-            self.buffer.consolidate_lines(curr_y, target_y);
-            self.modified = true;
-        }
-        // If not at the beginning of a line, backspace should move the caret one to the
-        // left and then delete the character to its right.
-        else {
-            self.move_location(Direction::Left);
+
+        // Move the caret one grapheme left. At x == 0 this wraps to the end of the
+        // previous line, so the two lines must be joined; otherwise the caret just
+        // stepped back and we delete the grapheme now to its left.
+        self.move_location(Direction::Left);
+
+        if x == 0 {
+            self.buffer.consolidate_lines(y, y.saturating_sub(1));
+        } else {
             self.handle_delete();
         }
+
+        // guarantees a re-render.
+        self.modified = true;
     }
 }
 

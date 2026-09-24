@@ -31,6 +31,10 @@ impl Line {
     /// Appends the content of `other` to this line, keeping this line's existing content first.
     pub fn append(&mut self, other: Self) {
         self.content.extend(other.content);
+        // we need to convert the full line into a string and then back to vec<TextFragment>
+        // in case appending other to self modifies the edge graphemes
+        let content_string = self.convert_content_to_string(0..self.grapheme_count());
+        self.content = Line::convert_string_to_content(&content_string);
     }
 
     pub fn convert_content_to_string(&self, range: Range<usize>) -> String {
