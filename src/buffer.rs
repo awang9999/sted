@@ -132,17 +132,13 @@ mod tests {
         }
     }
 
-    fn line_len(line: &Line) -> usize {
-        line.width_until(line.grapheme_count())
-    }
-
     #[test]
     fn delete_removes_grapheme_on_existing_line() {
         let mut buf = make_buffer(&["abcd"]);
         // Location (0, 0) → deletes grapheme at index 0 from line[0] ('a')
         buf.delete(Location { x: 0, y: 0 });
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            buf.lines[0].to_string(),
             "bcd"
         );
     }
@@ -153,7 +149,7 @@ mod tests {
         // Location (3, 0) → deletes grapheme at index 3 from line[0] ('d')
         buf.delete(Location { x: 3, y: 0 });
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            buf.lines[0].to_string(),
             "abcef"
         );
     }
@@ -164,7 +160,7 @@ mod tests {
         // Location (2, 0) → deletes grapheme at index 2 ('c')
         buf.delete(Location { x: 2, y: 0 });
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            buf.lines[0].to_string(),
             "ab"
         );
     }
@@ -198,7 +194,7 @@ mod tests {
         let mut buf = make_buffer(&["hello", "world"]);
         buf.delete(Location { x: 0, y: 0 }); // deletes from first line
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..line_len(&buf.lines[0])),
+            buf.lines[0].to_string(),
             "ello"
         );
 
@@ -214,7 +210,7 @@ mod tests {
         buf.consolidate_lines(1, 0);
         assert_eq!(buf.lines.len(), 1);
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count()),
+            buf.lines[0].to_string(),
             "abcd"
         );
     }
@@ -225,7 +221,7 @@ mod tests {
         buf.consolidate_lines(1, 0);
         assert_eq!(buf.lines.len(), 1);
         assert_eq!(
-            buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count()),
+            buf.lines[0].to_string(),
             "cd"
         );
     }
@@ -252,7 +248,7 @@ mod tests {
 
         buf.insert_char(Location { x: 0, y: 0 }, 'x');
         assert_eq!(buf.lines.len(), 1);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert_eq!(text, "x");
     }
 
@@ -262,7 +258,7 @@ mod tests {
 
         buf.insert_char(Location { x: 2, y: 0 }, 'X');
         assert_eq!(buf.lines[0].grapheme_count(), 4);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert_eq!(text, "abXc");
     }
 
@@ -272,7 +268,7 @@ mod tests {
 
         buf.insert_char(Location { x: 0, y: 0 }, 'W');
         assert_eq!(buf.lines[0].grapheme_count(), 6);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert_eq!(text, "Whello");
     }
 
@@ -290,7 +286,7 @@ mod tests {
             '!',
         );
         assert_eq!(buf.lines[0].grapheme_count(), len_before + 1);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert_eq!(text, "hello!");
     }
 
@@ -324,7 +320,7 @@ mod tests {
         // y=5, buffer is empty (len=0), so location.y >= lines.len → creates a new line!
         buf.insert_char(Location { x: 0, y: 5 }, 'x');
         assert_eq!(buf.lines.len(), 1);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert_eq!(text, "x");
     }
 
@@ -335,7 +331,7 @@ mod tests {
         // Insert an emoji grapheme
         buf.insert_char(Location { x: 2, y: 0 }, '👍');
         assert_eq!(buf.lines[0].grapheme_count(), 4);
-        let text: String = buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+        let text: String = buf.lines[0].to_string();
         assert!(text.contains("👍"));
     }
 
@@ -347,10 +343,10 @@ mod tests {
         buf.insert_char(Location { x: 0, y: 0 }, 'Z');
         assert_eq!(buf.lines.len(), 2);
         let first: String =
-            buf.lines[0].convert_content_to_string(0..buf.lines[0].grapheme_count());
+            buf.lines[0].to_string();
         assert_eq!(first, "Z");
         let second: String =
-            buf.lines[1].convert_content_to_string(0..buf.lines[1].grapheme_count());
+            buf.lines[1].to_string();
         assert_eq!(second, "abc");
     }
 
@@ -359,7 +355,7 @@ mod tests {
     // - The Line::insert_char inside gets x past the end of the line, which is okay (inserts at EOF).
 
     fn line_text(line: &Line) -> String {
-        line.convert_content_to_string(0..line.grapheme_count())
+        line.to_string()
     }
 
     #[test]

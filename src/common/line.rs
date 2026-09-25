@@ -2,6 +2,7 @@ use crate::common::{
     constants::TAB_WIDTH_SPACES,
     textfragment::{GraphemeWidth, TextFragment},
 };
+use std::fmt;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -11,6 +12,19 @@ pub struct Line {
     content: Vec<TextFragment>,
     pub scroll_x: usize,
 }
+
+/// Renders the line's raw text content (the actual graphemes), not the
+/// on-screen representation. This is the round-trippable form used when
+/// re-parsing a line's content; use [`Line::get`] for what is drawn.
+impl fmt::Display for Line {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for fragment in &self.content {
+            f.write_str(&fragment.grapheme)?;
+        }
+        Ok(())
+    }
+}
+
 impl Line {
     pub fn newline() -> Self {
         Self {
@@ -33,17 +47,8 @@ impl Line {
         self.content.extend(other.content);
         // we need to convert the full line into a string and then back to vec<TextFragment>
         // in case appending other to self modifies the edge graphemes
-        let content_string = self.convert_content_to_string(0..self.grapheme_count());
+        let content_string = self.to_string();
         self.content = Line::convert_string_to_content(&content_string);
-    }
-
-    pub fn convert_content_to_string(&self, range: Range<usize>) -> String {
-        self.content[range]
-            .iter()
-            .fold(String::new(), |mut acc, fragment| {
-                acc.push_str(&fragment.grapheme);
-                acc
-            })
     }
 
     fn convert_string_to_content(line_str: &str) -> Vec<TextFragment> {
@@ -224,7 +229,7 @@ mod tests {
 
         line.delete_grapheme(2); // removes 'l'
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "helo"
         );
     }
@@ -235,21 +240,21 @@ mod tests {
 
         line.delete_grapheme(0); // remove 'a'
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "bc"
         );
 
         let mut line = Line::from("abc");
         line.delete_grapheme(2); // remove 'c' — left with ["a", "b"]
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "ab"
         );
 
         // On the same line, delete at index 0 removes 'a', leaving ['b']
         line.delete_grapheme(0);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "b"
         );
     }
@@ -292,7 +297,7 @@ mod tests {
         let mut line = Line::from("bc");
         line.insert_char(0, 'a');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
     }
@@ -302,7 +307,7 @@ mod tests {
         let mut line = Line::from("ac");
         line.insert_char(1, 'b');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
     }
@@ -312,7 +317,7 @@ mod tests {
         let mut line = Line::from("ab");
         line.insert_char(2, 'c');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
     }
@@ -322,7 +327,7 @@ mod tests {
         let mut line = Line::from("");
         line.insert_char(0, 'x');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "x"
         );
         assert_eq!(line.grapheme_count(), 1);
@@ -335,7 +340,7 @@ mod tests {
         line.insert_char(10, 'z');
         assert_eq!(line.grapheme_count(), 4);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abcz"
         );
     }
@@ -347,7 +352,7 @@ mod tests {
         line.insert_char(5, 'w');
         assert_eq!(line.grapheme_count(), 1);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "w"
         );
     }
@@ -359,7 +364,7 @@ mod tests {
         line.insert_char(0, 'b');
         line.insert_char(0, 'a');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
     }
@@ -369,14 +374,14 @@ mod tests {
         let mut line = Line::from("hello");
         line.insert_char(3, 'X');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "helXlo"
         );
 
         // Verify remaining graphemes are intact
         line.insert_char(6, 'Y');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "helXloY"
         );
     }
@@ -385,7 +390,7 @@ mod tests {
     fn insert_char_with_emoji() {
         let mut line = Line::from("ab");
         line.insert_char(1, '👍');
-        let text = line.convert_content_to_string(0..line.grapheme_count());
+        let text = line.to_string();
         assert!(text.contains('👍'));
         assert_eq!(line.grapheme_count(), 3);
     }
@@ -394,7 +399,7 @@ mod tests {
     fn insert_char_at_beginning_of_emoji_line() {
         let mut line = Line::from("👍bc");
         line.insert_char(0, 'a');
-        let text = line.convert_content_to_string(0..line.grapheme_count());
+        let text = line.to_string();
         assert!(text.starts_with('a'));
         assert_eq!(line.grapheme_count(), 4);
     }
@@ -403,7 +408,7 @@ mod tests {
     fn insert_char_between_two_emoji() {
         let mut line = Line::from("👍🎉");
         line.insert_char(1, 'x');
-        let text = line.convert_content_to_string(0..line.grapheme_count());
+        let text = line.to_string();
         assert_eq!(text, "👍x🎉");
         assert_eq!(line.grapheme_count(), 3);
     }
@@ -414,7 +419,7 @@ mod tests {
         for i in 0..5 {
             line.insert_char(1, char::from_digit(i, 10).unwrap());
         }
-        let text = line.convert_content_to_string(0..line.grapheme_count());
+        let text = line.to_string();
         // Each insertion at index 1 pushes the previous inserted characters right
         assert_eq!(text, "a43210bc");
     }
@@ -425,7 +430,7 @@ mod tests {
         let mut line = Line::from("hello");
         line.insert_char(0, 'H');
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "Hhello"
         );
     }
@@ -435,11 +440,11 @@ mod tests {
         let mut line = Line::from("abcdef");
         let after = line.split_at(3);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
         assert_eq!(
-            after.convert_content_to_string(0..after.grapheme_count()),
+            after.to_string(),
             "def"
         );
     }
@@ -450,7 +455,7 @@ mod tests {
         let after = line.split_at(0);
         assert_eq!(line.grapheme_count(), 0);
         assert_eq!(
-            after.convert_content_to_string(0..after.grapheme_count()),
+            after.to_string(),
             "abcdef"
         );
     }
@@ -460,7 +465,7 @@ mod tests {
         let mut line = Line::from("abcdef");
         let after = line.split_at(6);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abcdef"
         );
         assert_eq!(after.grapheme_count(), 0);
@@ -479,7 +484,7 @@ mod tests {
         let mut line = Line::from("abc");
         let after = line.split_at(100);
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "abc"
         );
         assert_eq!(after.grapheme_count(), 0);
@@ -494,11 +499,11 @@ mod tests {
         let after = line.split_at(2);
 
         assert_eq!(
-            line.convert_content_to_string(0..line.grapheme_count()),
+            line.to_string(),
             "a👨‍👩‍👧"
         );
         assert_eq!(
-            after.convert_content_to_string(0..after.grapheme_count()),
+            after.to_string(),
             "b"
         );
     }
