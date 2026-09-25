@@ -2,6 +2,8 @@
 pub enum GraphemeWidth {
     Half,
     Full,
+    /// A tab, which renders as `TAB_WIDTH_SPACES` columns of spaces.
+    Tab,
 }
 
 #[derive(Clone)]

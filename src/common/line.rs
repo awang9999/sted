@@ -51,9 +51,14 @@ impl Line {
             .graphemes(true)
             .map(|grapheme| {
                 let unicode_width = grapheme.width();
-                let rendered_width = match unicode_width {
-                    0 | 1 => GraphemeWidth::Half,
-                    _ => GraphemeWidth::Full,
+                // Tabs render as TAB_WIDTH_SPACES spaces, so they must be
+                // measured with that width instead of their Unicode width of 0.
+                let rendered_width = match grapheme {
+                    "\t" => GraphemeWidth::Tab,
+                    _ => match unicode_width {
+                        0 | 1 => GraphemeWidth::Half,
+                        _ => GraphemeWidth::Full,
+                    },
                 };
 
                 let replacement = Line::replacement_character(grapheme);
@@ -142,6 +147,7 @@ impl Line {
             .map(|fragment| match fragment.rendered_width {
                 GraphemeWidth::Half => 1,
                 GraphemeWidth::Full => 2,
+                GraphemeWidth::Tab => TAB_WIDTH_SPACES,
             })
             .sum()
     }
@@ -181,6 +187,21 @@ impl Line {
         }
 
         self.content = Self::convert_string_to_content(&result);
+    }
+
+    /// Splits this line at `grapheme_index`: the graphemes before the index
+    /// stay in place and a new `Line` containing the remainder is returned.
+    ///
+    /// The index is clamped to the line's length, so splitting an empty line
+    /// or splitting past the end of the line leaves this line intact and
+    /// yields an empty remainder.
+    pub fn split_at(&mut self, grapheme_index: usize) -> Line {
+        let index = grapheme_index.min(self.content.len());
+        let remainder = self.content.split_off(index);
+        Self {
+            content: remainder,
+            scroll_x: 0,
+        }
     }
 
     /// Removes the grapheme cluster at `grapheme_index` from this line's content.
@@ -407,5 +428,101 @@ mod tests {
             line.convert_content_to_string(0..line.grapheme_count()),
             "Hhello"
         );
+    }
+
+    #[test]
+    fn split_at_mid_line_splits_into_prefix_and_remainder() {
+        let mut line = Line::from("abcdef");
+        let after = line.split_at(3);
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+        assert_eq!(
+            after.convert_content_to_string(0..after.grapheme_count()),
+            "def"
+        );
+    }
+
+    #[test]
+    fn split_at_beginning_of_line_yields_empty_prefix() {
+        let mut line = Line::from("abcdef");
+        let after = line.split_at(0);
+        assert_eq!(line.grapheme_count(), 0);
+        assert_eq!(
+            after.convert_content_to_string(0..after.grapheme_count()),
+            "abcdef"
+        );
+    }
+
+    #[test]
+    fn split_at_end_of_line_yields_empty_remainder() {
+        let mut line = Line::from("abcdef");
+        let after = line.split_at(6);
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abcdef"
+        );
+        assert_eq!(after.grapheme_count(), 0);
+    }
+
+    #[test]
+    fn split_at_on_empty_line_yields_two_empty_lines() {
+        let mut line = Line::from("");
+        let after = line.split_at(0);
+        assert_eq!(line.grapheme_count(), 0);
+        assert_eq!(after.grapheme_count(), 0);
+    }
+
+    #[test]
+    fn split_at_out_of_bounds_clamps_to_end_of_line() {
+        let mut line = Line::from("abc");
+        let after = line.split_at(100);
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "abc"
+        );
+        assert_eq!(after.grapheme_count(), 0);
+    }
+
+    #[test]
+    fn split_at_never_splits_a_merged_emoji_fragment() {
+        let mut line = Line::from("a👨‍👩‍👧b");
+        // 'a', the family emoji (merged into one fragment), 'b'
+        assert_eq!(line.grapheme_count(), 3);
+
+        let after = line.split_at(2);
+
+        assert_eq!(
+            line.convert_content_to_string(0..line.grapheme_count()),
+            "a👨‍👩‍👧"
+        );
+        assert_eq!(
+            after.convert_content_to_string(0..after.grapheme_count()),
+            "b"
+        );
+    }
+
+    #[test]
+    fn width_until_counts_a_tab_as_tab_width_spaces() {
+        let line = Line::from("ab\tx");
+        assert_eq!(line.width_until(0), 0);
+        assert_eq!(line.width_until(1), 1);
+        assert_eq!(line.width_until(2), 2);
+        // the tab occupies TAB_WIDTH_SPACES columns
+        assert_eq!(line.width_until(3), 2 + TAB_WIDTH_SPACES);
+        assert_eq!(line.width_until(4), 3 + TAB_WIDTH_SPACES);
+    }
+
+    #[test]
+    fn width_until_on_tab_only_line_is_tab_width() {
+        let line = Line::from("\t");
+        assert_eq!(line.width_until(1), TAB_WIDTH_SPACES);
+    }
+
+    #[test]
+    fn get_renders_a_tab_as_tab_width_spaces() {
+        let line = Line::from("a\tb");
+        assert_eq!(line.get(0..10), "a    b");
     }
 }

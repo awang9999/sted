@@ -293,11 +293,12 @@ impl View {
         self.modified = true;
     }
 
-    // Inserts a line below the caret position
-    // Force a re-render
+    /// Splits the line at the caret (or appends an empty line when the caret
+    /// is below the last line) and moves the caret to the beginning of the
+    /// new line. Forces a re-render.
     fn handle_newline(&mut self) {
-        self.buffer.newline(self.location);
-        self.set_location(0, self.location.y + 1);
+        let new_location = self.buffer.newline(self.location);
+        self.set_location(new_location.x, new_location.y);
         self.desired_x = 0;
         self.scroll_location_into_view();
         self.modified = true;
@@ -603,5 +604,145 @@ mod tests {
         let text: String = view.buffer.lines[0]
             .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
         assert_eq!(text, "café!");
+    }
+
+    #[test]
+    fn handle_insert_tab_inserts_a_tab_grapheme() {
+        let mut view = make_view(&["ab"]);
+        view.set_location(1, 0);
+
+        view.handle_insert('\t');
+
+        let line = &view.buffer.lines[0];
+        assert_eq!(line.grapheme_count(), 3);
+        let text: String = line.convert_content_to_string(0..line.grapheme_count());
+        assert_eq!(text, "a\tb");
+        assert_eq!((view.location.x, view.location.y), (2, 0));
+    }
+
+    #[test]
+    fn handle_insert_tab_on_blank_line_moves_caret_by_tab_width_columns() {
+        let mut view = make_view(&[""]);
+        view.set_location(0, 0);
+
+        view.handle_insert('\t');
+
+        // The caret is one grapheme in, but that grapheme (a tab) renders as
+        // TAB_WIDTH_SPACES columns, so the on-screen caret column must match.
+        assert_eq!(view.get_caret_position().col, TAB_WIDTH_SPACES);
+        assert_eq!(view.location.y, 0);
+    }
+
+    #[test]
+    fn handle_newline_splits_line_at_caret_and_moves_caret_to_new_line() {
+        let mut view = make_view(&["abcdef"]);
+        view.set_location(3, 0);
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 2);
+        let top: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        let bottom: String = view.buffer.lines[1]
+            .convert_content_to_string(0..view.buffer.lines[1].grapheme_count());
+        assert_eq!(top, "abc");
+        assert_eq!(bottom, "def");
+        assert_eq!((view.location.x, view.location.y), (0, 1));
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn handle_newline_at_beginning_of_line_puts_empty_line_above() {
+        let mut view = make_view(&["abcdef"]);
+        view.set_location(0, 0);
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 2);
+        assert_eq!(view.buffer.lines[0].grapheme_count(), 0);
+        let bottom: String = view.buffer.lines[1]
+            .convert_content_to_string(0..view.buffer.lines[1].grapheme_count());
+        assert_eq!(bottom, "abcdef");
+        assert_eq!((view.location.x, view.location.y), (0, 1));
+    }
+
+    #[test]
+    fn handle_newline_at_end_of_line_puts_empty_line_below() {
+        let mut view = make_view(&["abcdef"]);
+        view.set_location(6, 0);
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 2);
+        let top: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        assert_eq!(top, "abcdef");
+        assert_eq!(view.buffer.lines[1].grapheme_count(), 0);
+        assert_eq!((view.location.x, view.location.y), (0, 1));
+    }
+
+    #[test]
+    fn handle_newline_at_bottom_of_document_appends_a_single_empty_line() {
+        let mut view = make_view(&["abc", "def"]);
+        view.set_location(0, 2); // the "one past the end" position
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 3);
+        let texts: Vec<String> = view
+            .buffer
+            .lines
+            .iter()
+            .map(|l| l.convert_content_to_string(0..l.grapheme_count()))
+            .collect();
+        assert_eq!(texts, vec!["abc", "def", ""]);
+        assert_eq!((view.location.x, view.location.y), (0, 2));
+    }
+
+    #[test]
+    fn handle_newline_on_empty_buffer_appends_a_single_empty_line() {
+        let mut view = make_view(&[]);
+        view.set_location(0, 0);
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 1);
+        assert_eq!(view.buffer.lines[0].grapheme_count(), 0);
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn handle_newline_in_middle_of_document_does_not_touch_other_lines() {
+        let mut view = make_view(&["first", "second", "third"]);
+        view.set_location(2, 1);
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 4);
+        let texts: Vec<String> = view
+            .buffer
+            .lines
+            .iter()
+            .map(|l| l.convert_content_to_string(0..l.grapheme_count()))
+            .collect();
+        assert_eq!(texts, vec!["first", "se", "cond", "third"]);
+        assert_eq!((view.location.x, view.location.y), (0, 2));
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn handle_newline_keeps_tab_in_upper_line_when_splitting_after_it() {
+        let mut view = make_view(&["ab\txyz"]);
+        view.set_location(3, 0); // between the tab and 'x'
+
+        view.handle_newline();
+
+        assert_eq!(view.buffer.lines.len(), 2);
+        let top: String = view.buffer.lines[0]
+            .convert_content_to_string(0..view.buffer.lines[0].grapheme_count());
+        let bottom: String = view.buffer.lines[1]
+            .convert_content_to_string(0..view.buffer.lines[1].grapheme_count());
+        assert_eq!(top, "ab\t");
+        assert_eq!(bottom, "xyz");
     }
 }

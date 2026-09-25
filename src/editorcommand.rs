@@ -45,6 +45,8 @@ impl TryFrom<Event> for EditorCommand {
                 (KeyCode::End, KeyModifiers::NONE) => Ok(Self::Move(Direction::End)),
                 // Ordinary presses
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => Ok(Self::Insert(c)),
+                // Tab inserts a literal tab character
+                (KeyCode::Tab, KeyModifiers::NONE) => Ok(Self::Insert('\t')),
                 // Enter
                 (KeyCode::Enter, KeyModifiers::NONE) => Ok(Self::NewLine),
                 // Delete
@@ -64,5 +66,41 @@ impl TryFrom<Event> for EditorCommand {
             }
             _ => Err(format!("Event not supported: {event:?}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn tab_maps_to_inserting_a_tab_character() {
+        let command =
+            EditorCommand::try_from(press(KeyCode::Tab)).expect("Tab should be supported");
+        assert!(matches!(command, EditorCommand::Insert(c) if c == '\t'));
+    }
+
+    #[test]
+    fn enter_maps_to_newline() {
+        let command =
+            EditorCommand::try_from(press(KeyCode::Enter)).expect("Enter should be supported");
+        assert!(matches!(command, EditorCommand::NewLine));
+    }
+
+    #[test]
+    fn plain_character_maps_to_insert() {
+        let command =
+            EditorCommand::try_from(press(KeyCode::Char('a'))).expect("Char should be supported");
+        assert!(matches!(command, EditorCommand::Insert('a')));
+    }
+
+    #[test]
+    fn unsupported_key_is_an_error() {
+        let result = EditorCommand::try_from(press(KeyCode::F(1)));
+        assert!(result.is_err());
     }
 }

@@ -58,22 +58,36 @@ impl Buffer {
         }
     }
 
-    pub fn newline(&mut self, location: Location) {
+    /// Handles Enter pressed at `location` and returns the location the caret
+    /// should move to (always column 0 of the new line):
+    /// - within a line, the line is split at the caret and everything after
+    ///   the caret becomes the new line below;
+    /// - at the beginning of a line, a new empty line is placed before the
+    ///   current one (the current content moves down);
+    /// - at the end of a line, a new empty line is placed after it;
+    /// - below the last line, a new empty line is appended to the document.
+    pub fn newline(&mut self, location: Location) -> Location {
+        // Enter below the last line (a position we allow navigating to):
+        // append a single empty line to the end of the document and place
+        // the caret on it.
         if location.y >= self.lines.len() {
+            let new_line_index = self.lines.len();
             self.lines.push(Line::newline());
+            return Location {
+                x: 0,
+                y: new_line_index,
+            };
         }
 
-        let str_before_caret = self.lines[location.y].convert_content_to_string(0..location.x);
-        let str_after_caret = self.lines[location.y]
-            .convert_content_to_string(location.x..self.lines[location.y].grapheme_count());
+        // Clamp to the line's length so Enter at or past the end of a line
+        // simply appends an empty line below it.
+        let index = location.x.min(self.lines[location.y].grapheme_count());
+        let after_caret = self.lines[location.y].split_at(index);
+        self.lines.insert(location.y + 1, after_caret);
 
-        self.lines[location.y] = Line::from(&str_before_caret);
-
-        if location.y + 1 >= self.lines.len() {
-            self.lines.push(Line::from(&str_after_caret));
-        } else {
-            self.lines
-                .insert(location.y + 1, Line::from(&str_after_caret));
+        Location {
+            x: 0,
+            y: location.y + 1,
         }
     }
 
@@ -343,4 +357,81 @@ mod tests {
     // Note: insert_char does NOT silently ignore out-of-bounds. Instead:
     // - When `location.y >= lines.len()` it *creates* a new line at that index.
     // - The Line::insert_char inside gets x past the end of the line, which is okay (inserts at EOF).
+
+    fn line_text(line: &Line) -> String {
+        line.convert_content_to_string(0..line.grapheme_count())
+    }
+
+    #[test]
+    fn newline_splits_line_in_middle() {
+        let mut buf = make_buffer(&["abcdef"]);
+        let caret = buf.newline(Location { x: 3, y: 0 });
+        assert_eq!(buf.lines.len(), 2);
+        assert_eq!(line_text(&buf.lines[0]), "abc");
+        assert_eq!(line_text(&buf.lines[1]), "def");
+        assert_eq!((caret.x, caret.y), (0, 1));
+    }
+
+    #[test]
+    fn newline_at_beginning_of_line_places_empty_line_before() {
+        let mut buf = make_buffer(&["abcdef"]);
+        let caret = buf.newline(Location { x: 0, y: 0 });
+        assert_eq!(buf.lines.len(), 2);
+        assert_eq!(buf.lines[0].grapheme_count(), 0);
+        assert_eq!(line_text(&buf.lines[1]), "abcdef");
+        assert_eq!((caret.x, caret.y), (0, 1));
+    }
+
+    #[test]
+    fn newline_at_end_of_line_places_empty_line_after() {
+        let mut buf = make_buffer(&["abcdef"]);
+        let caret = buf.newline(Location { x: 6, y: 0 });
+        assert_eq!(buf.lines.len(), 2);
+        assert_eq!(line_text(&buf.lines[0]), "abcdef");
+        assert_eq!(buf.lines[1].grapheme_count(), 0);
+        assert_eq!((caret.x, caret.y), (0, 1));
+    }
+
+    #[test]
+    fn newline_with_caret_past_end_of_line_is_treated_as_end_of_line() {
+        let mut buf = make_buffer(&["ab"]);
+        let caret = buf.newline(Location { x: 5, y: 0 });
+        assert_eq!(buf.lines.len(), 2);
+        assert_eq!(line_text(&buf.lines[0]), "ab");
+        assert_eq!(buf.lines[1].grapheme_count(), 0);
+        assert_eq!((caret.x, caret.y), (0, 1));
+    }
+
+    #[test]
+    fn newline_below_last_line_appends_a_single_empty_line() {
+        let mut buf = make_buffer(&["abc", "def"]);
+        // Row 2 is the "one past the end" position we allow navigating to
+        let caret = buf.newline(Location { x: 0, y: 2 });
+        assert_eq!(buf.lines.len(), 3);
+        assert_eq!(line_text(&buf.lines[0]), "abc");
+        assert_eq!(line_text(&buf.lines[1]), "def");
+        assert_eq!(buf.lines[2].grapheme_count(), 0);
+        assert_eq!((caret.x, caret.y), (0, 2));
+    }
+
+    #[test]
+    fn newline_on_empty_buffer_appends_a_single_empty_line() {
+        let mut buf = Buffer::default();
+        let caret = buf.newline(Location { x: 0, y: 0 });
+        assert_eq!(buf.lines.len(), 1);
+        assert_eq!(buf.lines[0].grapheme_count(), 0);
+        assert_eq!((caret.x, caret.y), (0, 0));
+    }
+
+    #[test]
+    fn newline_in_middle_of_document_leaves_other_lines_untouched() {
+        let mut buf = make_buffer(&["first", "second", "third"]);
+        let caret = buf.newline(Location { x: 2, y: 1 });
+        assert_eq!(buf.lines.len(), 4);
+        assert_eq!(line_text(&buf.lines[0]), "first");
+        assert_eq!(line_text(&buf.lines[1]), "se");
+        assert_eq!(line_text(&buf.lines[2]), "cond");
+        assert_eq!(line_text(&buf.lines[3]), "third");
+        assert_eq!((caret.x, caret.y), (0, 2));
+    }
 }
