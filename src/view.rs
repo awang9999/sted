@@ -57,6 +57,11 @@ impl View {
             EditorCommand::Delete => self.handle_delete(),
             EditorCommand::BackSpace => self.handle_backspace(),
             EditorCommand::Quit => (),
+            EditorCommand::Save => {
+                // Saving errors are suppressed for now; they will be
+                // reported to the user later in this chapter.
+                let _ = self.buffer.save();
+            }
         };
     }
 
@@ -344,6 +349,7 @@ mod tests {
         let buffer = Buffer {
             lines: lines_data.iter().copied().map(|s| Line::from(s)).collect(),
             modified: true,
+            file_name: None,
         };
         View {
             buffer,

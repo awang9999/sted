@@ -1,10 +1,14 @@
 use crate::common::{line::Line, types::Location};
-use std::fs::read_to_string;
+use std::fs::{File, read_to_string};
+use std::io::Write;
 
 #[derive(Clone)]
 pub struct Buffer {
     pub lines: Vec<Line>,
     pub modified: bool,
+    /// The path of the file this buffer was loaded from, if any.
+    /// `None` means the buffer is a new, unsaved document.
+    pub file_name: Option<String>,
 }
 
 impl Default for Buffer {
@@ -12,6 +16,7 @@ impl Default for Buffer {
         Self {
             lines: vec![],
             modified: true,
+            file_name: None,
         }
     }
 }
@@ -39,7 +44,25 @@ impl Buffer {
         Ok(Self {
             lines: lines,
             modified: true,
+            file_name: Some(file_path.to_string()),
         })
+    }
+
+    /// Writes all lines of the buffer to the file it was loaded from.
+    /// Returns an error if the buffer has no file name (e.g. it is a new document).
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        if let Some(file_name) = &self.file_name {
+            let mut file = File::create(file_name)?;
+            for line in &self.lines {
+                writeln!(file, "{}", line)?;
+            }
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No file name is associated with this buffer.",
+            ))
+        }
     }
 
     pub fn get_col_from_text_location(&self, location: Location) -> usize {
@@ -129,6 +152,7 @@ mod tests {
         Buffer {
             lines: lines_data.iter().copied().map(make_line).collect(),
             modified: false,
+            file_name: None,
         }
     }
 
@@ -137,10 +161,7 @@ mod tests {
         let mut buf = make_buffer(&["abcd"]);
         // Location (0, 0) → deletes grapheme at index 0 from line[0] ('a')
         buf.delete(Location { x: 0, y: 0 });
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "bcd"
-        );
+        assert_eq!(buf.lines[0].to_string(), "bcd");
     }
 
     #[test]
@@ -148,10 +169,7 @@ mod tests {
         let mut buf = make_buffer(&["abcdef"]);
         // Location (3, 0) → deletes grapheme at index 3 from line[0] ('d')
         buf.delete(Location { x: 3, y: 0 });
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "abcef"
-        );
+        assert_eq!(buf.lines[0].to_string(), "abcef");
     }
 
     #[test]
@@ -159,10 +177,7 @@ mod tests {
         let mut buf = make_buffer(&["abc"]);
         // Location (2, 0) → deletes grapheme at index 2 ('c')
         buf.delete(Location { x: 2, y: 0 });
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "ab"
-        );
+        assert_eq!(buf.lines[0].to_string(), "ab");
     }
 
     #[test]
@@ -193,10 +208,7 @@ mod tests {
     fn delete_across_multiple_lines() {
         let mut buf = make_buffer(&["hello", "world"]);
         buf.delete(Location { x: 0, y: 0 }); // deletes from first line
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "ello"
-        );
+        assert_eq!(buf.lines[0].to_string(), "ello");
 
         let second_before = buf.lines[1].grapheme_count();
         buf.delete(Location { x: 2, y: 1 }); // deletes from second line
@@ -209,10 +221,7 @@ mod tests {
         // Merge line 1 ("cd") into line 0 ("ab")
         buf.consolidate_lines(1, 0);
         assert_eq!(buf.lines.len(), 1);
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "abcd"
-        );
+        assert_eq!(buf.lines[0].to_string(), "abcd");
     }
 
     #[test]
@@ -220,10 +229,7 @@ mod tests {
         let mut buf = make_buffer(&["", "cd"]);
         buf.consolidate_lines(1, 0);
         assert_eq!(buf.lines.len(), 1);
-        assert_eq!(
-            buf.lines[0].to_string(),
-            "cd"
-        );
+        assert_eq!(buf.lines[0].to_string(), "cd");
     }
 
     #[test]
@@ -342,11 +348,9 @@ mod tests {
         // Insert into the empty first line; the other line must be untouched
         buf.insert_char(Location { x: 0, y: 0 }, 'Z');
         assert_eq!(buf.lines.len(), 2);
-        let first: String =
-            buf.lines[0].to_string();
+        let first: String = buf.lines[0].to_string();
         assert_eq!(first, "Z");
-        let second: String =
-            buf.lines[1].to_string();
+        let second: String = buf.lines[1].to_string();
         assert_eq!(second, "abc");
     }
 
@@ -429,5 +433,46 @@ mod tests {
         assert_eq!(line_text(&buf.lines[2]), "cond");
         assert_eq!(line_text(&buf.lines[3]), "third");
         assert_eq!((caret.x, caret.y), (0, 2));
+    }
+
+    #[test]
+    fn load_tracks_the_file_name() {
+        let path = std::env::temp_dir().join(format!("sted_test_load_{}.txt", std::process::id()));
+        std::fs::write(&path, "hello\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let buf = Buffer::load(&file_path).expect("load should succeed");
+        assert_eq!(buf.file_name.as_deref(), Some(file_path.as_str()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn new_buffer_has_no_file_name() {
+        let buf = Buffer::default();
+        assert!(buf.file_name.is_none());
+    }
+
+    #[test]
+    fn save_writes_buffer_contents_to_file() {
+        let path = std::env::temp_dir().join(format!("sted_test_save_{}.txt", std::process::id()));
+        std::fs::write(&path, "line one\nline two\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut buf = Buffer::load(&file_path).expect("load should succeed");
+        buf.insert_char(Location { x: 0, y: 1 }, 'X');
+        buf.save().expect("save should succeed");
+
+        let saved = std::fs::read_to_string(&file_path).unwrap();
+        let saved_lines: Vec<&str> = saved.lines().collect();
+        assert_eq!(saved_lines, vec!["line one", "Xline two"]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_without_file_name_is_an_error() {
+        let buf = make_buffer(&["hello"]);
+        assert!(buf.save().is_err());
     }
 }

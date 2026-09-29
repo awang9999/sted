@@ -22,6 +22,7 @@ pub enum EditorCommand {
     Delete,
     BackSpace,
     Quit,
+    Save,
 }
 
 impl TryFrom<Event> for EditorCommand {
@@ -34,6 +35,7 @@ impl TryFrom<Event> for EditorCommand {
             }) => match (code, modifiers) {
                 // Program control
                 (KeyCode::Char('q'), KeyModifiers::CONTROL) => Ok(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => Ok(Self::Save),
                 // Caret movement
                 (KeyCode::Up, KeyModifiers::NONE) => Ok(Self::Move(Direction::Up)),
                 (KeyCode::Down, KeyModifiers::NONE) => Ok(Self::Move(Direction::Down)),
@@ -102,5 +104,14 @@ mod tests {
     fn unsupported_key_is_an_error() {
         let result = EditorCommand::try_from(press(KeyCode::F(1)));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn ctrl_s_maps_to_save() {
+        let event =
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let command =
+            EditorCommand::try_from(event).expect("Ctrl-S should be supported");
+        assert!(matches!(command, EditorCommand::Save));
     }
 }
