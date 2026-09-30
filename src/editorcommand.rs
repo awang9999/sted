@@ -3,6 +3,7 @@ use std::convert::TryFrom;
 
 use super::terminal::Size;
 
+#[derive(Clone, Copy)]
 pub enum Direction {
     PageUp,
     PageDown,
@@ -14,6 +15,7 @@ pub enum Direction {
     Down,
 }
 
+#[derive(Clone, Copy)]
 pub enum EditorCommand {
     Move(Direction),
     Resize(Size),

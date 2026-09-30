@@ -1,4 +1,5 @@
 use crate::editorcommand::EditorCommand;
+use crate::statusbar::StatusBar;
 use crate::terminal::Terminal;
 use crate::view::View;
 use crossterm::event::{
@@ -9,13 +10,16 @@ use crossterm::event::{
 pub struct Editor {
     should_quit: bool,
     view: View,
+    status_bar: StatusBar,
 }
 
 impl Default for Editor {
     fn default() -> Self {
+        let terminal_size = Terminal::size().unwrap_or_default();
         Self {
             should_quit: false,
-            view: View::default(),
+            view: View::new(terminal_size),
+            status_bar: StatusBar::new(terminal_size),
         }
     }
 }
@@ -32,7 +36,9 @@ impl Editor {
 
         Terminal::initialize()?;
 
-        let mut view = View::default();
+        let terminal_size = Terminal::size().unwrap_or_default();
+        let mut view = View::new(terminal_size);
+        let status_bar = StatusBar::new(terminal_size);
 
         let args: Vec<String> = std::env::args().collect();
 
@@ -43,10 +49,15 @@ impl Editor {
         Ok(Self {
             should_quit: false,
             view,
+            status_bar,
         })
     }
 
     pub fn run(&mut self) {
+        // Sync before the first frame, otherwise the bar would render its
+        // default (empty) state and stay stale until the first event.
+        self.status_bar.update(self.view.get_status());
+
         loop {
             self.refresh_screen();
             if self.should_quit {
@@ -62,6 +73,8 @@ impl Editor {
                     }
                 }
             }
+
+            self.status_bar.update(self.view.get_status());
         }
     }
 
@@ -79,6 +92,9 @@ impl Editor {
                         self.should_quit = true;
                     } else {
                         self.view.handle_command(command);
+                        if let EditorCommand::Resize(size) = command {
+                            self.status_bar.resize(size);
+                        }
                     }
                 }
                 Err(err) => {
@@ -99,6 +115,7 @@ impl Editor {
     fn refresh_screen(&mut self) {
         let _ = Terminal::hide_cursor();
         self.view.render();
+        self.status_bar.render();
         let _ = Terminal::move_cursor_to_pos(&self.view.get_caret_position());
         let _ = Terminal::show_cursor();
         let _ = Terminal::execute();

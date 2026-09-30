@@ -2,23 +2,14 @@ use crate::common::{line::Line, types::Location};
 use std::fs::{File, read_to_string};
 use std::io::Write;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Buffer {
     pub lines: Vec<Line>,
+    /// True when the buffer content differs from what is on disk (unsaved changes).
     pub modified: bool,
     /// The path of the file this buffer was loaded from, if any.
     /// `None` means the buffer is a new, unsaved document.
     pub file_name: Option<String>,
-}
-
-impl Default for Buffer {
-    fn default() -> Self {
-        Self {
-            lines: vec![],
-            modified: true,
-            file_name: None,
-        }
-    }
 }
 
 impl Buffer {
@@ -28,6 +19,7 @@ impl Buffer {
 
     pub fn load(file_path: &str) -> Result<Self, std::io::Error> {
         let mut lines: Vec<Line> = Vec::new();
+        let mut modified = false;
 
         match read_to_string(file_path) {
             Ok(file_content) => {
@@ -38,24 +30,27 @@ impl Buffer {
             Err(error) => {
                 lines.push(Line::from(&format!("Failed to read file at {}", file_path)));
                 lines.push(Line::from(&format!("Error message: {}", error)));
+                // The buffer holds fabricated error text, not the file's content.
+                modified = true;
             }
         }
 
         Ok(Self {
-            lines: lines,
-            modified: true,
+            lines,
+            modified,
             file_name: Some(file_path.to_string()),
         })
     }
 
     /// Writes all lines of the buffer to the file it was loaded from.
     /// Returns an error if the buffer has no file name (e.g. it is a new document).
-    pub fn save(&self) -> Result<(), std::io::Error> {
+    pub fn save(&mut self) -> Result<(), std::io::Error> {
         if let Some(file_name) = &self.file_name {
             let mut file = File::create(file_name)?;
             for line in &self.lines {
                 writeln!(file, "{}", line)?;
             }
+            self.modified = false;
             Ok(())
         } else {
             Err(std::io::Error::new(
@@ -76,8 +71,10 @@ impl Buffer {
     pub fn insert_char(&mut self, location: Location, c: char) {
         if location.y >= self.lines.len() {
             self.lines.push(Line::from(&format!("{c}")));
+            self.modified = true;
         } else if let Some(line) = self.lines.get_mut(location.y) {
             line.insert_char(location.x, c);
+            self.modified = true;
         }
     }
 
@@ -96,6 +93,7 @@ impl Buffer {
         if location.y >= self.lines.len() {
             let new_line_index = self.lines.len();
             self.lines.push(Line::newline());
+            self.modified = true;
             return Location {
                 x: 0,
                 y: new_line_index,
@@ -107,6 +105,7 @@ impl Buffer {
         let index = location.x.min(self.lines[location.y].grapheme_count());
         let after_caret = self.lines[location.y].split_at(index);
         self.lines.insert(location.y + 1, after_caret);
+        self.modified = true;
 
         Location {
             x: 0,
@@ -120,6 +119,7 @@ impl Buffer {
             return;
         } else if let Some(line) = self.lines.get_mut(location.y) {
             line.delete_grapheme(location.x);
+            self.modified = true;
         }
     }
 
@@ -134,6 +134,7 @@ impl Buffer {
         }
         let source = self.lines.remove(source_index);
         self.lines[target_index].append(source);
+        self.modified = true;
     }
 }
 
@@ -472,7 +473,7 @@ mod tests {
 
     #[test]
     fn save_without_file_name_is_an_error() {
-        let buf = make_buffer(&["hello"]);
+        let mut buf = make_buffer(&["hello"]);
         assert!(buf.save().is_err());
     }
 }

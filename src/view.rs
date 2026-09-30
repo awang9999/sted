@@ -1,7 +1,8 @@
 use crate::buffer::Buffer;
-use crate::common::constants::TAB_WIDTH_SPACES;
+use crate::common::constants::{RESERVED_BOTTOM_LINES, TAB_WIDTH_SPACES};
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
+use crate::statusbar::DocumentStatus;
 use crate::terminal::{Position, Size, Terminal};
 use std::cmp::min;
 
@@ -16,20 +17,42 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
+        Self::new(Terminal::size().unwrap_or_default())
+    }
+}
+
+impl View {
+    pub fn new(size: Size) -> Self {
         View {
             buffer: Buffer::default(),
             modified: true,
-            size: Terminal::size().unwrap_or_default(),
+            size: Self::viewport_size(size),
             location: Location::default(),
             scroll_offset: Position::default(),
             desired_x: 0,
         }
     }
-}
 
-impl View {
+    /// The part of the terminal the buffer is rendered into: the full
+    /// terminal minus the rows reserved for the status bar at the bottom.
+    fn viewport_size(terminal: Size) -> Size {
+        Size {
+            width: terminal.width,
+            height: terminal.height.saturating_sub(RESERVED_BOTTOM_LINES),
+        }
+    }
+
+    pub fn get_status(&self) -> DocumentStatus {
+        DocumentStatus {
+            file_name: self.buffer.file_name.clone(),
+            total_lines: self.buffer.lines.len(),
+            current_line: self.location.y,
+            is_modified: self.buffer.modified,
+        }
+    }
+
     pub fn resize(&mut self, to: Size) {
-        self.size = to;
+        self.size = Self::viewport_size(to);
         self.modified = true;
     }
 
@@ -88,8 +111,6 @@ impl View {
                 let _ = Terminal::move_cursor_to(0, current_row.saturating_add(1));
             }
         }
-
-        self.buffer.modified = false;
     }
 
     fn render_line(row: usize, line_text: &str) {
