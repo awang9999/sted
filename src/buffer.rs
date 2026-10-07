@@ -17,29 +17,27 @@ impl Buffer {
         self.lines.is_empty()
     }
 
-    pub fn load(file_path: &str) -> Result<Self, std::io::Error> {
+    pub fn load(file_path: &str) -> Self {
         let mut lines: Vec<Line> = Vec::new();
         let mut modified = false;
 
         match read_to_string(file_path) {
             Ok(file_content) => {
-                for line in file_content.lines() {
-                    lines.push(Line::from(line));
-                }
+                lines.extend(file_content.lines().map(Line::from));
             }
             Err(error) => {
-                lines.push(Line::from(&format!("Failed to read file at {}", file_path)));
-                lines.push(Line::from(&format!("Error message: {}", error)));
+                lines.push(Line::from(&format!("Failed to read file at {file_path}")));
+                lines.push(Line::from(&format!("Error message: {error}")));
                 // The buffer holds fabricated error text, not the file's content.
                 modified = true;
             }
         }
 
-        Ok(Self {
+        Self {
             lines,
             modified,
             file_name: Some(file_path.to_string()),
-        })
+        }
     }
 
     /// Writes all lines of the buffer to the file it was loaded from.
@@ -48,7 +46,7 @@ impl Buffer {
         if let Some(file_name) = &self.file_name {
             let mut file = File::create(file_name)?;
             for line in &self.lines {
-                writeln!(file, "{}", line)?;
+                writeln!(file, "{line}")?;
             }
             self.modified = false;
             Ok(())
@@ -61,10 +59,9 @@ impl Buffer {
     }
 
     pub fn get_col_from_text_location(&self, location: Location) -> usize {
-        if location.y >= self.lines.len() || self.lines.is_empty() {
-            return 0;
-        }
-        self.lines[location.y].width_until(location.x)
+        self.lines
+            .get(location.y)
+            .map_or(0, |line| line.width_until(location.x))
     }
 
     /// Inserts character `c` at column `location.x` on row `location.y`. Creates a new line if the row exceeds the buffer length.
@@ -104,20 +101,19 @@ impl Buffer {
         // simply appends an empty line below it.
         let index = location.x.min(self.lines[location.y].grapheme_count());
         let after_caret = self.lines[location.y].split_at(index);
-        self.lines.insert(location.y + 1, after_caret);
+        let new_line_index = location.y.saturating_add(1);
+        self.lines.insert(new_line_index, after_caret);
         self.modified = true;
 
         Location {
             x: 0,
-            y: location.y + 1,
+            y: new_line_index,
         }
     }
 
     /// Deletes the grapheme cluster at column `location.x` on row `location.y`.
     pub fn delete(&mut self, location: Location) {
-        if location.y >= self.lines.len() {
-            return;
-        } else if let Some(line) = self.lines.get_mut(location.y) {
+        if let Some(line) = self.lines.get_mut(location.y) {
             line.delete_grapheme(location.x);
             self.modified = true;
         }
@@ -442,7 +438,7 @@ mod tests {
         std::fs::write(&path, "hello\n").unwrap();
         let file_path = path.to_string_lossy().to_string();
 
-        let buf = Buffer::load(&file_path).expect("load should succeed");
+        let buf = Buffer::load(&file_path);
         assert_eq!(buf.file_name.as_deref(), Some(file_path.as_str()));
 
         let _ = std::fs::remove_file(&path);
@@ -460,7 +456,7 @@ mod tests {
         std::fs::write(&path, "line one\nline two\n").unwrap();
         let file_path = path.to_string_lossy().to_string();
 
-        let mut buf = Buffer::load(&file_path).expect("load should succeed");
+        let mut buf = Buffer::load(&file_path);
         buf.insert_char(Location { x: 0, y: 1 }, 'X');
         buf.save().expect("save should succeed");
 

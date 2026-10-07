@@ -26,8 +26,10 @@ impl DocumentStatus {
         );
         let middle = format!(" - {} lines | ({state})", self.total_lines);
         let filename_length = file.len().min(50); // truncated past 50
-        let align_width = width - middle.len() - filename_length;
-        format!("{:<.50}{}{:>align_width$}", file, middle, line_frac)
+        let align_width = width
+            .saturating_sub(middle.len())
+            .saturating_sub(filename_length);
+        format!("{file:<.50}{middle}{line_frac:>align_width$}")
     }
 }
 

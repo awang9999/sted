@@ -37,7 +37,7 @@ impl Line {
         let content = Self::convert_string_to_content(line_str);
 
         Self {
-            content: content,
+            content,
             scroll_x: 0,
         }
     }
@@ -73,15 +73,14 @@ impl Line {
 
         // Merge fragments that form a compound emoji via U+200D.
         let mut merged: Vec<TextFragment> = Vec::with_capacity(fragments.len());
-        let mut i = 0;
-        while i < fragments.len() {
-            let mut current = fragments[i].clone();
-            while i + 1 < fragments.len()
-                && (fragments[i].grapheme.ends_with('\u{200d}')
-                    || fragments[i + 1].grapheme.starts_with('\u{200d}'))
+        let mut pending = fragments.iter().peekable();
+        while let Some(fragment) = pending.next() {
+            let mut current = fragment.clone();
+            while let Some(next) = pending.peek()
+                && (current.grapheme.ends_with('\u{200d}')
+                    || next.grapheme.starts_with('\u{200d}'))
             {
-                let next_str = &fragments[i + 1].grapheme;
-                let combined_str = format!("{}{}", current.grapheme, next_str);
+                let combined_str = format!("{}{}", current.grapheme, next.grapheme);
 
                 let width = UnicodeWidthStr::width(combined_str.as_str());
                 let rendered_width = if width > 1 {
@@ -89,16 +88,16 @@ impl Line {
                 } else {
                     GraphemeWidth::Half
                 };
-                let replacement = Line::replacement_character(combined_str.as_str());
+                let replacement = Line::replacement_character(&combined_str);
 
                 current.grapheme = combined_str;
                 current.rendered_width = rendered_width;
                 current.replacement = replacement;
 
-                i += 1; // skip merged fragment
+                // Consume the merged fragment.
+                pending.next();
             }
             merged.push(current);
-            i += 1;
         }
 
         merged
@@ -118,31 +117,31 @@ impl Line {
 
         // Skip past graphemes before the visible range
         while idx < self.content.len() && self.width_until(idx) < range.start {
-            idx += 1;
+            idx = idx.saturating_add(1);
         }
 
         // Truncation at range.start?
-        if idx > 0 && self.width_until(idx - 1) < range.start {
-            segment.push_str("…");
-            idx += 1;
+        if idx > 0 && self.width_until(idx.saturating_sub(1)) < range.start {
+            segment.push('…');
+            idx = idx.saturating_add(1);
         }
 
         // Add graphemes within the visible range
-        while idx < self.content.len() && self.width_until(idx + 1) <= range.end {
-            segment.push_str(&self.content[idx].get_display_text());
-            idx += 1;
+        while idx < self.content.len() && self.width_until(idx.saturating_add(1)) <= range.end {
+            segment.push_str(self.content[idx].get_display_text());
+            idx = idx.saturating_add(1);
         }
 
         // Truncation at range.end?
         if idx < self.content.len() && self.width_until(idx) > range.end {
-            segment.push_str("…");
+            segment.push('…');
         }
 
         segment
     }
 
     pub fn grapheme_count(&self) -> usize {
-        return self.content.len();
+        self.content.len()
     }
 
     pub fn width_until(&self, grapheme_index: usize) -> usize {
@@ -167,29 +166,26 @@ impl Line {
             // Any visible whitespace characters besides spaces and tabs
             _ if width > 0 && for_str.trim().is_empty() => Some('␣'.to_string()),
             // Control characters (one or more consecutive)
-            _ if for_str.chars().all(|c| c.is_control()) => Some('▯'.to_string()),
+            _ if for_str.chars().all(char::is_control) => Some('▯'.to_string()),
             _ => None,
         }
     }
 
     /// Inserts character `c` at `grapheme_index`, shifting all subsequent graphemes right.
     pub fn insert_char(&mut self, grapheme_index: usize, c: char) {
-        let mut result = String::new();
-        let mut idx = 0; // track index of grapheme vector
+        // Clamped insertion index: inserting past the end appends at EOF.
+        let index = grapheme_index.min(self.content.len());
 
-        // Build string using the TextFragment graphemes up to the insertion index
-        while idx < grapheme_index && idx < self.content.len() {
-            result.push_str(&self.content[idx].grapheme);
-            idx += 1;
-        }
-
-        result.push_str(&format!("{c}"));
-
-        // insert remaining TextFragments as graphemes
-        while idx < self.content.len() {
-            result.push_str(&self.content[idx].grapheme);
-            idx += 1;
-        }
+        // Build the new content from the graphemes before the insertion index,
+        // the inserted character, and the graphemes from the index onward.
+        let mut result: String = self
+            .content
+            .iter()
+            .take(index)
+            .map(|fragment| fragment.grapheme.as_str())
+            .collect();
+        result.push(c);
+        result.extend(self.content.iter().skip(index).map(|fragment| fragment.grapheme.as_str()));
 
         self.content = Self::convert_string_to_content(&result);
     }
@@ -211,10 +207,9 @@ impl Line {
 
     /// Removes the grapheme cluster at `grapheme_index` from this line's content.
     pub fn delete_grapheme(&mut self, grapheme_index: usize) {
-        if grapheme_index >= self.content.len() {
-            return;
-        };
-        self.content.remove(grapheme_index);
+        if grapheme_index < self.content.len() {
+            self.content.remove(grapheme_index);
+        }
     }
 }
 

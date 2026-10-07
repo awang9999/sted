@@ -1,5 +1,6 @@
 use crate::buffer::Buffer;
-use crate::common::constants::{RESERVED_BOTTOM_LINES, TAB_WIDTH_SPACES};
+use crate::common::constants::RESERVED_BOTTOM_LINES;
+use crate::common::line::Line;
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
 use crate::statusbar::DocumentStatus;
@@ -65,10 +66,8 @@ impl View {
     }
 
     pub fn load(&mut self, file_name: &str) {
-        if let Ok(buffer) = Buffer::load(file_name) {
-            self.buffer = buffer;
-            self.modified = true;
-        }
+        self.buffer = Buffer::load(file_name);
+        self.modified = true;
     }
 
     pub fn get_caret_position(&self) -> Position {
@@ -76,7 +75,7 @@ impl View {
             col: self.buffer.get_col_from_text_location(self.location),
             row: self.location.y,
         };
-        caret_position.subtract(&self.scroll_offset).into()
+        caret_position.subtract(&self.scroll_offset)
     }
 
     pub fn handle_command(&mut self, event: EditorCommand) {
@@ -93,7 +92,7 @@ impl View {
                 // reported to the user later in this chapter.
                 let _ = self.buffer.save();
             }
-        };
+        }
     }
 
     pub fn render_buffer(&mut self) {
@@ -110,9 +109,9 @@ impl View {
                 let left = self.scroll_offset.col;
                 let right = self.scroll_offset.col.saturating_add(width);
                 let truncated_line = &line.get(left..right);
-                let _ = Self::render_line(current_row, truncated_line);
+                Self::render_line(current_row, truncated_line);
             } else {
-                let _ = Self::render_line(current_row, "~");
+                Self::render_line(current_row, "~");
             }
 
             if current_row.saturating_add(1) < height {
@@ -131,7 +130,7 @@ impl View {
             return;
         }
 
-        let _ = self.render_buffer();
+        self.render_buffer();
 
         if self.buffer.is_empty() {
             let _ = self.render_welcome_screen();
@@ -192,14 +191,9 @@ impl View {
 
             // Horizontal movements
             Direction::Left => {
-                if x <= 0 && y > 0 {
+                if x == 0 && y > 0 {
                     y = y.saturating_sub(1);
-                    x = self
-                        .buffer
-                        .lines
-                        .get(y)
-                        .map(|l| l.grapheme_count())
-                        .unwrap_or(0);
+                    x = self.buffer.lines.get(y).map_or(0, Line::grapheme_count);
                 } else {
                     x = x.saturating_sub(1);
                 }
@@ -207,7 +201,7 @@ impl View {
             }
 
             Direction::Right => {
-                if let Some(len) = self.buffer.lines.get(y).map(|l| l.grapheme_count()) {
+                if let Some(len) = self.buffer.lines.get(y).map(Line::grapheme_count) {
                     if x >= len && y < buffer_length {
                         y = y.saturating_add(1);
                         x = 0;
@@ -224,7 +218,7 @@ impl View {
                 self.desired_x = x;
             }
             Direction::End => {
-                if let Some(len) = self.buffer.lines.get(y).map(|l| l.grapheme_count()) {
+                if let Some(len) = self.buffer.lines.get(y).map(Line::grapheme_count) {
                     x = len;
                     self.desired_x = x;
                 }
@@ -240,8 +234,7 @@ impl View {
                 .buffer
                 .lines
                 .get(y)
-                .map(|l| min(self.desired_x, l.grapheme_count()))
-                .unwrap_or(0);
+                .map_or(0, |l| min(self.desired_x, l.grapheme_count()));
         }
 
         self.set_location(x, y);
@@ -303,7 +296,7 @@ impl View {
 
             // Persist the updated horizontal scroll state to the target line
             if let Some(line) = self.buffer.lines.get_mut(clamped_y) {
-                line.scroll_x = scroll.col
+                line.scroll_x = scroll.col;
             }
         }
 
@@ -313,17 +306,17 @@ impl View {
     }
 
     pub fn set_location(&mut self, x: usize, y: usize) {
-        self.set_location_coord(Location { x: x, y: y })
+        self.set_location_coord(Location { x, y });
     }
 
     pub fn set_location_coord(&mut self, pos: Location) {
-        self.location = pos
+        self.location = pos;
     }
 
     /// Inserts a character, moves the caret right, scrolls it into view, marks buffer and view as modified.
     fn handle_insert(&mut self, c: char) {
         self.buffer.insert_char(self.location, c);
-        self.set_location(self.location.x + 1, self.location.y);
+        self.set_location(self.location.x.saturating_add(1), self.location.y);
         self.scroll_location_into_view();
         self.modified = true;
     }
@@ -372,11 +365,12 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::constants::TAB_WIDTH_SPACES;
     use crate::common::line::Line;
 
     fn make_view(lines_data: &[&str]) -> View {
         let buffer = Buffer {
-            lines: lines_data.iter().copied().map(|s| Line::from(s)).collect(),
+            lines: lines_data.iter().copied().map(Line::from).collect(),
             modified: true,
             file_name: None,
         };

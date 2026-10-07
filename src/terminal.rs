@@ -33,11 +33,9 @@ impl Position {
 }
 
 /// Represents the Terminal.
-/// Edge Case for platforms where `usize` < `u16`:
-/// Regardless of the actual size of the Terminal, this representation
-/// only spans over at most `usize::MAX` or `u16::size` rows/columns, whichever is smaller.
-/// Each size returned truncates to min(`usize::MAX`, `u16::MAX`)
-/// And should you attempt to set the cursor out of these bounds, it will also be truncated.
+/// Coordinates are tracked as `usize`. When a coordinate must be handed to
+/// the terminal (which only accepts `u16`), values beyond `u16::MAX` are
+/// clamped to `u16::MAX` instead of being silently truncated.
 #[derive(Copy, Clone)]
 pub struct Terminal;
 
@@ -77,21 +75,25 @@ impl Terminal {
     /// # Arguments
     /// * `Position` - the  `Position`to move the cursor to. Will be truncated to `u16::MAX` if bigger.
     pub fn move_cursor_to_pos(c: &Position) -> Result<(), Error> {
-        #[allow(clippy::cast_possible_truncation)]
-        Self::queue_command(MoveTo(c.col as u16, c.row as u16))?;
+        Self::queue_command(MoveTo(Self::clamp_to_u16(c.col), Self::clamp_to_u16(c.row)))?;
         Ok(())
     }
 
     /// Returns the current size of this Terminal.
-    /// Edge Case for systems with `usize` < `u16`:
-    /// * A `Size` representing the terminal size. Any coordinate `z` truncated to `usize` if `usize` < `z` < `u16`
+    /// * A `Size` representing the terminal size. `u16` always fits in
+    ///   `usize`, so the conversion is exact on every Rust target.
     pub fn size() -> Result<Size, Error> {
         let (w_u16, h_u16) = size()?;
-        #[allow(clippy::cast_possible_truncation)]
         Ok(Size {
-            width: w_u16 as usize,
-            height: h_u16 as usize,
+            width: usize::from(w_u16),
+            height: usize::from(h_u16),
         })
+    }
+
+    /// Clamps a coordinate to the `u16` range, mapping any value beyond
+    /// `u16::MAX` to `u16::MAX` instead of silently truncating it.
+    fn clamp_to_u16(value: usize) -> u16 {
+        u16::try_from(value).unwrap_or(u16::MAX)
     }
     pub fn hide_cursor() -> Result<(), Error> {
         Self::queue_command(Hide)?;
@@ -102,7 +104,7 @@ impl Terminal {
         Ok(())
     }
     pub fn clear_row(row: usize) -> Result<(), Error> {
-        Self::queue_command(MoveToRow(row as u16))?;
+        Self::queue_command(MoveToRow(Self::clamp_to_u16(row)))?;
         Self::queue_command(Clear(ClearType::CurrentLine))?;
         Ok(())
     }

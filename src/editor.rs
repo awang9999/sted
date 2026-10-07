@@ -43,7 +43,7 @@ impl Editor {
         let args: Vec<String> = std::env::args().collect();
 
         if let Some(file_name) = args.get(1) {
-            let _ = view.load(file_name);
+            view.load(file_name);
         }
 
         Ok(Self {
@@ -67,9 +67,15 @@ impl Editor {
             match read() {
                 Ok(event) => self.evaluate_event(event),
                 Err(err) => {
+                    // The error is only reported in debug builds; in release
+                    // it is intentionally ignored and the loop continues.
                     #[cfg(debug_assertions)]
                     {
                         panic!("Could not read event: {err:?}");
+                    }
+                    #[cfg(not(debug_assertions))]
+                    {
+                        let _ = err;
                     }
                 }
             }
@@ -79,11 +85,7 @@ impl Editor {
     }
 
     fn evaluate_event(&mut self, event: Event) {
-        let should_process = match event {
-            Key(_) => true,
-            Resize(_, _) => true,
-            _ => false,
-        };
+        let should_process = matches!(event, Key(_) | Resize(_, _));
 
         if should_process {
             match EditorCommand::try_from(event) {
@@ -98,9 +100,15 @@ impl Editor {
                     }
                 }
                 Err(err) => {
+                    // The error is only reported in debug builds; in release
+                    // it is intentionally ignored and the loop continues.
                     #[cfg(debug_assertions)]
                     {
-                        print!("Could not handle command: {err}");
+                        eprint!("Could not handle command: {err}");
+                    }
+                    #[cfg(not(debug_assertions))]
+                    {
+                        let _ = err;
                     }
                 }
             }

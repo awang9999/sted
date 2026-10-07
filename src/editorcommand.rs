@@ -60,12 +60,10 @@ impl TryFrom<Event> for EditorCommand {
                 _ => Err(format!("Key Code not supported: {code:?}")),
             },
             Event::Resize(width_u16, height_u16) => {
-                // clippy::as_conversions: Will run into problems for rare edge case systems where usize < u16
-                #[allow(clippy::as_conversions)]
-                let height = height_u16 as usize;
-                // clippy::as_conversions: Will run into problems for rare edge case systems where usize < u16
-                #[allow(clippy::as_conversions)]
-                let width = width_u16 as usize;
+                // `u16` always fits in `usize`, so this conversion is exact
+                // on every Rust target.
+                let height = usize::from(height_u16);
+                let width = usize::from(width_u16);
                 Ok(Self::Resize(Size { height, width }))
             }
             _ => Err(format!("Event not supported: {event:?}")),

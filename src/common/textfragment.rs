@@ -21,8 +21,8 @@ impl TextFragment {
     ) -> Self {
         Self {
             grapheme: grapheme.to_string(),
-            rendered_width: rendered_width,
-            replacement: replacement,
+            rendered_width,
+            replacement,
         }
     }
 
