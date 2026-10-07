@@ -114,8 +114,14 @@ impl Editor {
 
     fn refresh_screen(&mut self) {
         let _ = Terminal::hide_cursor();
-        self.view.render();
-        self.status_bar.render();
+        let terminal_height = Terminal::size().unwrap().height;
+        if terminal_height >= 3 {
+            self.view.render();
+        }
+        if terminal_height >= 2 {
+            self.status_bar.render();
+        }
+        // TODO: self.message_bar.render();
         let _ = Terminal::move_cursor_to_pos(&self.view.get_caret_position());
         let _ = Terminal::show_cursor();
         let _ = Terminal::execute();

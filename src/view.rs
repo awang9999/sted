@@ -52,6 +52,14 @@ impl View {
     }
 
     pub fn resize(&mut self, to: Size) {
+        // When the terminal shrinks, every row at or above the new height is
+        // gone, but the new last row keeps whatever it held before (buffer
+        // text or the status bar). Clear it so no stale content lingers below
+        // the viewport, since neither render pass touches that row.
+        let old_terminal_height = self.size.height.saturating_add(RESERVED_BOTTOM_LINES);
+        if to.height > 0 && to.height < old_terminal_height {
+            let _ = Terminal::clear_row(to.height.saturating_sub(1));
+        }
         self.size = Self::viewport_size(to);
         self.modified = true;
     }
@@ -386,6 +394,24 @@ mod tests {
     }
 
     #[test]
+    fn resize_shrink_updates_viewport_and_marks_modified() {
+        let mut view = make_view(&["a", "b"]);
+        view.modified = false;
+
+        view.resize(Size {
+            width: 80,
+            height: 20,
+        });
+
+        assert_eq!(
+            view.size.height,
+            20usize.saturating_sub(RESERVED_BOTTOM_LINES)
+        );
+        assert_eq!(view.size.width, 80);
+        assert!(view.modified);
+    }
+
+    #[test]
     fn handle_delete_marks_view_as_modified() {
         let mut view = make_view(&["abc"]);
         assert!(!view.modified); // render clears modified
@@ -401,8 +427,7 @@ mod tests {
 
         view.handle_delete(); // deletes grapheme at index 0 ('h')
         assert_eq!(view.buffer.lines[0].grapheme_count(), 4);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert!(!text.contains('h'));
     }
 
@@ -412,8 +437,7 @@ mod tests {
         view.set_location(3, 0); // caret between 'd' and 'e'
 
         view.handle_delete(); // deletes grapheme at index 3 ('d')
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert!(!text.contains('d'));
     }
 
@@ -423,8 +447,7 @@ mod tests {
         // Location is (0, 0) which is within bounds — buffer.delete handles row-OOB internally
         view.handle_delete();
         assert!(view.modified);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert!(!text.contains('a'));
     }
 
@@ -452,8 +475,7 @@ mod tests {
         view.handle_backspace();
 
         assert_eq!(view.buffer.lines.len(), 1);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "abcd");
         // caret lands at the end of the previous line
         assert_eq!((view.location.x, view.location.y), (2, 0));
@@ -468,11 +490,7 @@ mod tests {
         view.handle_backspace();
 
         assert_eq!(view.buffer.lines.len(), 1);
-        assert_eq!(
-            view.buffer.lines[0]
-                .to_string(),
-            "ab"
-        );
+        assert_eq!(view.buffer.lines[0].to_string(), "ab");
     }
 
     #[test]
@@ -483,8 +501,7 @@ mod tests {
         view.handle_backspace();
 
         assert_eq!(view.buffer.lines.len(), 1);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "cd");
         // caret lands at the end of the (empty) previous line
         assert_eq!((view.location.x, view.location.y), (0, 0));
@@ -497,8 +514,7 @@ mod tests {
 
         view.handle_backspace();
 
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "acd");
         assert_eq!((view.location.x, view.location.y), (1, 0));
     }
@@ -529,8 +545,7 @@ mod tests {
         view.set_location(0, 0);
 
         view.handle_insert('x');
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "xhello");
     }
 
@@ -542,8 +557,7 @@ mod tests {
 
         view.handle_insert('!');
         assert_eq!(view.location.x, line_len + 1);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "hello!");
     }
 
@@ -554,8 +568,7 @@ mod tests {
 
         view.handle_insert('|');
         assert_eq!(view.location.x, 6);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "hello| world");
     }
 
@@ -566,8 +579,7 @@ mod tests {
 
         view.handle_insert('a');
         assert_eq!(view.location.x, 1);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "a");
     }
 
@@ -580,8 +592,7 @@ mod tests {
         assert_eq!(view.location.x, 1);
         view.handle_insert('y');
         assert_eq!(view.location.x, 2);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "xy");
     }
 
@@ -593,16 +604,14 @@ mod tests {
         view.set_location(0, 0);
         view.handle_insert('A');
         assert_eq!(view.location.x, 1);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "Aabc");
 
         // Move to second line and insert
         view.set_location(1, 1); // after 'd'
         view.handle_insert('X');
         assert_eq!(view.location.x, 2);
-        let text: String = view.buffer.lines[1]
-            .to_string();
+        let text: String = view.buffer.lines[1].to_string();
         assert_eq!(text, "dXef");
     }
 
@@ -629,8 +638,7 @@ mod tests {
 
         view.handle_insert('!');
         assert_eq!(view.location.x, 5);
-        let text: String = view.buffer.lines[0]
-            .to_string();
+        let text: String = view.buffer.lines[0].to_string();
         assert_eq!(text, "café!");
     }
 
@@ -669,10 +677,8 @@ mod tests {
         view.handle_newline();
 
         assert_eq!(view.buffer.lines.len(), 2);
-        let top: String = view.buffer.lines[0]
-            .to_string();
-        let bottom: String = view.buffer.lines[1]
-            .to_string();
+        let top: String = view.buffer.lines[0].to_string();
+        let bottom: String = view.buffer.lines[1].to_string();
         assert_eq!(top, "abc");
         assert_eq!(bottom, "def");
         assert_eq!((view.location.x, view.location.y), (0, 1));
@@ -688,8 +694,7 @@ mod tests {
 
         assert_eq!(view.buffer.lines.len(), 2);
         assert_eq!(view.buffer.lines[0].grapheme_count(), 0);
-        let bottom: String = view.buffer.lines[1]
-            .to_string();
+        let bottom: String = view.buffer.lines[1].to_string();
         assert_eq!(bottom, "abcdef");
         assert_eq!((view.location.x, view.location.y), (0, 1));
     }
@@ -702,8 +707,7 @@ mod tests {
         view.handle_newline();
 
         assert_eq!(view.buffer.lines.len(), 2);
-        let top: String = view.buffer.lines[0]
-            .to_string();
+        let top: String = view.buffer.lines[0].to_string();
         assert_eq!(top, "abcdef");
         assert_eq!(view.buffer.lines[1].grapheme_count(), 0);
         assert_eq!((view.location.x, view.location.y), (0, 1));
@@ -717,12 +721,7 @@ mod tests {
         view.handle_newline();
 
         assert_eq!(view.buffer.lines.len(), 3);
-        let texts: Vec<String> = view
-            .buffer
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let texts: Vec<String> = view.buffer.lines.iter().map(ToString::to_string).collect();
         assert_eq!(texts, vec!["abc", "def", ""]);
         assert_eq!((view.location.x, view.location.y), (0, 2));
     }
@@ -747,12 +746,7 @@ mod tests {
         view.handle_newline();
 
         assert_eq!(view.buffer.lines.len(), 4);
-        let texts: Vec<String> = view
-            .buffer
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let texts: Vec<String> = view.buffer.lines.iter().map(ToString::to_string).collect();
         assert_eq!(texts, vec!["first", "se", "cond", "third"]);
         assert_eq!((view.location.x, view.location.y), (0, 2));
         assert!(view.modified);
@@ -766,10 +760,8 @@ mod tests {
         view.handle_newline();
 
         assert_eq!(view.buffer.lines.len(), 2);
-        let top: String = view.buffer.lines[0]
-            .to_string();
-        let bottom: String = view.buffer.lines[1]
-            .to_string();
+        let top: String = view.buffer.lines[0].to_string();
+        let bottom: String = view.buffer.lines[1].to_string();
         assert_eq!(top, "ab\t");
         assert_eq!(bottom, "xyz");
     }

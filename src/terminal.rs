@@ -1,11 +1,13 @@
 use crossterm::cursor::{Hide, MoveTo, MoveToRow, Show};
-use crossterm::style::Print;
+use crossterm::style::{Attribute, Print};
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode, size,
+    Clear, ClearType, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen,
+    SetTitle, disable_raw_mode, enable_raw_mode, size,
 };
 use crossterm::{Command, queue};
 use std::io::{Error, Write, stdout};
+
+use crate::common::constants::EDITOR_TITLE;
 
 // A Size here represents the width and height of the Terminal in characters
 #[derive(Default, Copy, Clone)]
@@ -41,6 +43,7 @@ pub struct Terminal;
 
 impl Terminal {
     pub fn terminate() -> Result<(), Error> {
+        Self::queue_command(EnableLineWrap)?;
         Self::queue_command(LeaveAlternateScreen)?;
         Self::show_cursor()?;
         Self::execute()?;
@@ -51,6 +54,8 @@ impl Terminal {
         enable_raw_mode()?;
         Self::queue_command(EnterAlternateScreen)?;
         Self::clear_screen()?;
+        Self::queue_command(DisableLineWrap)?;
+        Self::queue_command(SetTitle(EDITOR_TITLE))?;
         Self::execute()?;
         Ok(())
     }
@@ -121,6 +126,18 @@ impl Terminal {
     pub fn print_at_pos(pos: &Position, string: &str) -> Result<(), Error> {
         Self::move_cursor_to_pos(pos)?;
         Self::print(string)?;
+        Ok(())
+    }
+
+    pub fn print_inverted_row(row: usize, string: &str) -> Result<(), Error> {
+        let width = Self::size()?.width;
+        let inverted_str = format!(
+            "{}{:width$.width$}{}",
+            Attribute::Reverse,
+            string,
+            Attribute::Reset
+        );
+        Self::print_at(0, row, &inverted_str)?;
         Ok(())
     }
 

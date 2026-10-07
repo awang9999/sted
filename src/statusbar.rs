@@ -12,18 +12,22 @@ pub struct DocumentStatus {
 }
 
 impl DocumentStatus {
-    fn as_line(&self) -> String {
-        let file = self.file_name.as_deref().unwrap_or("No file");
+    fn as_line(&self, width: usize) -> String {
+        let file = self.file_name.as_deref().unwrap_or("[No file]");
         let state = if self.is_modified {
             "modified"
         } else {
             "unmodified"
         };
-        format!(
-            "{file} | {} lines | line {} | {state}",
-            self.total_lines,
-            self.current_line.saturating_add(1)
-        )
+        let line_frac = format!(
+            "{}/{}",
+            self.current_line.saturating_add(1),
+            self.total_lines
+        );
+        let middle = format!(" - {} lines | ({state})", self.total_lines);
+        let filename_length = file.len().min(50); // truncated past 50
+        let align_width = width - middle.len() - filename_length;
+        format!("{:<.50}{}{:>align_width$}", file, middle, line_frac)
     }
 }
 
@@ -70,9 +74,9 @@ impl StatusBar {
         }
 
         let _ = Terminal::clear_row(self.row);
-        let mut text = self.state.as_line();
+        let mut text = self.state.as_line(self.width);
         text.truncate(self.width);
-        let result = Terminal::print_row(self.row, &text);
+        let result = Terminal::print_inverted_row(self.row, &text);
         debug_assert!(result.is_ok(), "Failed to render status bar");
         self.needs_redraw = false;
     }
@@ -149,19 +153,19 @@ mod tests {
 
     #[test]
     fn rendered_line_contains_all_status_information() {
-        let line = status(Some("file.txt"), 5, 2, true).as_line();
+        let line = status(Some("file.txt"), 5, 2, true).as_line(80);
         assert!(line.contains("file.txt"));
         assert!(line.contains("5 lines"));
-        assert!(line.contains("line 3"));
+        assert!(line.contains("3/5"));
         assert!(line.contains("modified"));
     }
 
     #[test]
     fn rendered_line_without_file_shows_placeholder() {
-        let line = status(None, 1, 0, false).as_line();
+        let line = status(None, 1, 0, false).as_line(80);
         assert!(line.contains("No file"));
         assert!(line.contains("1 line"));
-        assert!(line.contains("line 1"));
+        assert!(line.contains("1/1"));
         assert!(line.contains("unmodified"));
     }
 }
