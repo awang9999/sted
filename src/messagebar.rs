@@ -72,3 +72,100 @@ impl Default for MessageBar {
         Self::new(Terminal::size().unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar() -> MessageBar {
+        MessageBar::new(Size {
+            width: 80,
+            height: 24,
+        })
+    }
+
+    fn state(message: &str) -> MessageState {
+        MessageState {
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn new_bar_is_ready_to_render() {
+        assert!(bar().needs_redraw);
+    }
+
+    #[test]
+    fn new_bar_starts_with_empty_message() {
+        assert_eq!(bar().state, MessageState::default());
+    }
+
+    #[test]
+    fn bar_sits_on_the_last_reserved_row() {
+        assert_eq!(bar().row, 23);
+    }
+
+    #[test]
+    fn bar_row_saturates_when_terminal_is_shorter_than_reserved_rows() {
+        let bar = MessageBar::new(Size {
+            width: 80,
+            height: 0,
+        });
+        assert_eq!(bar.row, 1);
+    }
+
+    #[test]
+    fn resize_moves_the_bar_and_marks_it_dirty() {
+        let mut bar = bar();
+        bar.resize(Size {
+            width: 100,
+            height: 30,
+        });
+        assert_eq!(bar.row, 29);
+        assert_eq!(bar.width, 100);
+        assert!(bar.needs_redraw);
+    }
+
+    #[test]
+    fn update_with_identical_state_does_not_mark_dirty() {
+        let mut bar = bar();
+        bar.update(state("hello"));
+        bar.render();
+        assert!(!bar.needs_redraw);
+        bar.update(state("hello"));
+        assert!(!bar.needs_redraw);
+    }
+
+    #[test]
+    fn update_with_changed_state_marks_dirty() {
+        let mut bar = bar();
+        bar.update(state("hello"));
+        bar.render();
+        bar.update(state("goodbye"));
+        assert!(bar.needs_redraw);
+    }
+
+    #[test]
+    fn rendered_line_keeps_short_message_untouched() {
+        let line = state("hello").as_line(80);
+        assert_eq!(line, "hello");
+    }
+
+    #[test]
+    fn rendered_line_is_truncated_to_width_when_message_is_longer() {
+        let line = state("01234567890123456789").as_line(10);
+        assert_eq!(line, "0123456789");
+    }
+
+    #[test]
+    fn rendered_line_truncates_by_character_not_byte() {
+        let line = state("café").as_line(3);
+        assert_eq!(line, "caf");
+    }
+
+    #[test]
+    fn rendered_line_is_empty_when_message_is_empty() {
+        let line = state("").as_line(10);
+        assert_eq!(line, "");
+    }
+}
