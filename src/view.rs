@@ -3,7 +3,8 @@ use crate::common::constants::RESERVED_BOTTOM_LINES;
 use crate::common::line::Line;
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
-use crate::statusbar::DocumentStatus;
+use crate::messagebar::{MessageBar, MessageState};
+use crate::statusbar::{DocumentStatus, StatusBar};
 use crate::terminal::{Position, Size, Terminal};
 use std::cmp::min;
 
@@ -14,6 +15,8 @@ pub struct View {
     pub location: Location,      // location in the text (col, row) of grapheme
     pub scroll_offset: Position, // top left corner of viewport as a grid (independent of grapheme width)
     desired_x: usize,
+    status_bar: StatusBar,
+    message_bar: MessageBar,
 }
 
 impl Default for View {
@@ -31,6 +34,8 @@ impl View {
             location: Location::default(),
             scroll_offset: Position::default(),
             desired_x: 0,
+            status_bar: StatusBar::new(size),
+            message_bar: MessageBar::new(size),
         }
     }
 
@@ -52,6 +57,12 @@ impl View {
         }
     }
 
+    pub fn get_message(&self) -> MessageState {
+        MessageState {
+            message: String::from("HELP: C-s = Save | C-q = quit"),
+        }
+    }
+
     pub fn resize(&mut self, to: Size) {
         // When the terminal shrinks, every row at or above the new height is
         // gone, but the new last row keeps whatever it held before (buffer
@@ -63,6 +74,8 @@ impl View {
         }
         self.size = Self::viewport_size(to);
         self.modified = true;
+        self.status_bar.resize(to);
+        self.message_bar.resize(to);
     }
 
     pub fn load(&mut self, file_name: &str) {
@@ -125,18 +138,36 @@ impl View {
         debug_assert!(result.is_ok(), "Failed to render line");
     }
 
+    /// Draws everything the view owns: the buffer viewport and the status
+    /// bar. The height guards use the live terminal size because the stored
+    /// `size` is the viewport size, which cannot distinguish terminal
+    /// heights below the reserved bottom rows.
     pub fn render(&mut self) {
-        if !self.modified {
-            return;
+        let terminal_height = Terminal::size().unwrap().height;
+
+        // The buffer needs one viewport row, i.e. three terminal rows once
+        // the reserved bottom rows are included.
+        if terminal_height >= 3 && self.modified {
+            self.render_buffer();
+
+            if self.buffer.is_empty() {
+                let _ = self.render_welcome_screen();
+            }
+
+            self.modified = false;
         }
 
-        self.render_buffer();
-
-        if self.buffer.is_empty() {
-            let _ = self.render_welcome_screen();
+        // The bar always draws from the view's current state, so it can
+        // never lag behind the buffer or the caret.
+        if terminal_height >= 2 {
+            self.status_bar.update(self.get_status());
+            self.status_bar.render();
         }
 
-        self.modified = false;
+        if terminal_height >= 1 {
+            self.message_bar.update(self.get_message());
+            self.message_bar.render();
+        }
     }
 
     fn render_welcome_screen(&self) -> Result<(), std::io::Error> {
@@ -374,16 +405,19 @@ mod tests {
             modified: true,
             file_name: None,
         };
+        let terminal_size = Terminal::size().unwrap_or(Size {
+            height: 24,
+            width: 80,
+        });
         View {
             buffer,
             modified: false,
-            size: Terminal::size().unwrap_or(Size {
-                height: 24,
-                width: 80,
-            }),
+            size: terminal_size,
             location: Location::default(),
             scroll_offset: Position::default(),
             desired_x: 0,
+            status_bar: StatusBar::new(terminal_size),
+            message_bar: MessageBar::new(terminal_size),
         }
     }
 

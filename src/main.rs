@@ -11,6 +11,7 @@ mod buffer;
 mod common;
 mod editor;
 mod editorcommand;
+mod messagebar;
 mod statusbar;
 mod terminal;
 mod view;
