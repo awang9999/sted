@@ -1,9 +1,10 @@
+use crate::common::constants::{DEFAULT_MESSAGE_DURATION, EVENT_POLL_INTERVAL};
 use crate::editorcommand::EditorCommand;
 use crate::terminal::Terminal;
 use crate::view::View;
 use crossterm::event::{
     Event::{self, Key, Resize},
-    read,
+    poll, read,
 };
 
 pub struct Editor {
@@ -55,21 +56,29 @@ impl Editor {
                 break;
             }
 
-            match read() {
-                Ok(event) => self.evaluate_event(event),
-                Err(err) => {
-                    // The error is only reported in debug builds; in release
-                    // it is intentionally ignored and the loop continues.
-                    #[cfg(debug_assertions)]
-                    {
-                        panic!("Could not read event: {err:?}");
-                    }
-                    #[cfg(not(debug_assertions))]
-                    {
-                        let _ = err;
-                    }
-                }
+            // Poll instead of blocking on read() so time-based updates —
+            // like message bar expiry — fire while the user is idle.
+            match poll(EVENT_POLL_INTERVAL) {
+                Ok(true) => match read() {
+                    Ok(event) => self.evaluate_event(event),
+                    Err(err) => Self::report_event_error(&err),
+                },
+                Ok(false) => {}
+                Err(err) => Self::report_event_error(&err),
             }
+        }
+    }
+
+    /// Event I/O errors are reported in debug builds; in release they are
+    /// intentionally ignored and the loop continues.
+    fn report_event_error(err: &std::io::Error) {
+        #[cfg(debug_assertions)]
+        {
+            panic!("Could not read event: {err:?}");
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = err;
         }
     }
 
@@ -86,16 +95,9 @@ impl Editor {
                     }
                 }
                 Err(err) => {
-                    // The error is only reported in debug builds; in release
-                    // it is intentionally ignored and the loop continues.
-                    #[cfg(debug_assertions)]
-                    {
-                        eprint!("Could not handle command: {err}");
-                    }
-                    #[cfg(not(debug_assertions))]
-                    {
-                        let _ = err;
-                    }
+                    // Report the unrecognized command on the message bar; it
+                    // stays visible for the default duration.
+                    self.view.set_message(err, DEFAULT_MESSAGE_DURATION);
                 }
             }
         } else {
@@ -121,5 +123,27 @@ impl Drop for Editor {
         if self.should_quit {
             let _ = Terminal::print("Goodbye. \r\n");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Duration;
+
+    #[test]
+    fn unrecognized_command_is_reported_on_the_message_bar() {
+        let mut editor = Editor::default();
+
+        let event = Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        editor.evaluate_event(event);
+
+        let message = editor.view.get_message();
+        assert_eq!(message.message, "Key Code not supported: F(1)");
+        assert_eq!(
+            message.duration,
+            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
+        );
     }
 }

@@ -1,5 +1,5 @@
 use crate::buffer::Buffer;
-use crate::common::constants::RESERVED_BOTTOM_LINES;
+use crate::common::constants::{DEFAULT_MESSAGE_DURATION, RESERVED_BOTTOM_LINES};
 use crate::common::line::Line;
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
@@ -7,6 +7,9 @@ use crate::messagebar::{MessageBar, MessageState};
 use crate::statusbar::{DocumentStatus, StatusBar};
 use crate::terminal::{Position, Size, Terminal};
 use std::cmp::min;
+
+/// Shown on the message bar until a more specific message replaces it.
+const DEFAULT_MESSAGE: &str = "HELP: C-s = Save | C-q = quit";
 
 pub struct View {
     buffer: Buffer,
@@ -17,6 +20,7 @@ pub struct View {
     desired_x: usize,
     status_bar: StatusBar,
     message_bar: MessageBar,
+    message: MessageState,
 }
 
 impl Default for View {
@@ -36,6 +40,7 @@ impl View {
             desired_x: 0,
             status_bar: StatusBar::new(size),
             message_bar: MessageBar::new(size),
+            message: MessageState::create_default_duration(String::from(DEFAULT_MESSAGE)),
         }
     }
 
@@ -57,10 +62,17 @@ impl View {
         }
     }
 
+    /// The view's current message, stored so its display timer survives
+    /// across renders. Returning a clone (not a fresh state) is what keeps
+    /// the message from being re-armed on every render pass.
     pub fn get_message(&self) -> MessageState {
-        MessageState {
-            message: String::from("HELP: C-s = Save | C-q = quit"),
-        }
+        self.message.clone()
+    }
+
+    /// Replaces the message shown on the message bar and (re)starts its
+    /// display timer, so it stays visible for `duration_sec` seconds.
+    pub fn set_message(&mut self, message: String, duration_sec: u64) {
+        self.message = MessageState::create_message(message, duration_sec);
     }
 
     pub fn resize(&mut self, to: Size) {
@@ -104,6 +116,8 @@ impl View {
                 // Saving errors are suppressed for now; they will be
                 // reported to the user later in this chapter.
                 let _ = self.buffer.save();
+                // Briefly confirm the save on the message bar.
+                self.set_message(String::from("Saved!"), DEFAULT_MESSAGE_DURATION);
             }
         }
     }
@@ -165,6 +179,12 @@ impl View {
         }
 
         if terminal_height >= 1 {
+            // Drop messages that have outlived their duration before pushing
+            // them, so the bar can't re-animate a message it already cleared.
+            if self.message.created_at.elapsed() >= self.message.duration {
+                self.message = MessageState::default();
+            }
+
             self.message_bar.update(self.get_message());
             self.message_bar.render();
         }
@@ -398,6 +418,7 @@ mod tests {
     use super::*;
     use crate::common::constants::TAB_WIDTH_SPACES;
     use crate::common::line::Line;
+    use std::time::Duration;
 
     fn make_view(lines_data: &[&str]) -> View {
         let buffer = Buffer {
@@ -418,7 +439,24 @@ mod tests {
             desired_x: 0,
             status_bar: StatusBar::new(terminal_size),
             message_bar: MessageBar::new(terminal_size),
+            message: MessageState::default(),
         }
+    }
+
+    #[test]
+    fn get_message_returns_a_stable_state_across_calls() {
+        let mut view = make_view(&[]);
+        view.set_message(String::from("hi"), 5);
+        assert_eq!(view.get_message(), view.get_message());
+    }
+
+    #[test]
+    fn set_message_stores_message_and_duration() {
+        let mut view = make_view(&[]);
+        view.set_message(String::from("Saved!"), 5);
+        let message = view.get_message();
+        assert_eq!(message.message, "Saved!");
+        assert_eq!(message.duration, Duration::from_secs(5));
     }
 
     #[test]

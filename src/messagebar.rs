@@ -1,13 +1,36 @@
-use crate::common::constants::RESERVED_BOTTOM_LINES;
+use crate::common::constants::{
+    DEFAULT_MESSAGE_DURATION, LONG_MESSAGE_DURATION, RESERVED_BOTTOM_LINES,
+};
 use crate::terminal::{Size, Terminal};
+use std::time::{Duration, Instant};
 
 // The information the message bar displays about the current view.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageState {
     pub message: String,
+    pub duration: Duration,
+    pub created_at: Instant,
+}
+
+impl Default for MessageState {
+    fn default() -> Self {
+        MessageState::create_message(String::new(), LONG_MESSAGE_DURATION)
+    }
 }
 
 impl MessageState {
+    pub fn create_default_duration(message: String) -> Self {
+        MessageState::create_message(message, DEFAULT_MESSAGE_DURATION)
+    }
+
+    pub fn create_message(message: String, duration_sec: u64) -> Self {
+        Self {
+            message,
+            duration: Duration::new(duration_sec, 0),
+            created_at: Instant::now(),
+        }
+    }
+
     fn as_line(&self, width: usize) -> String {
         format!("{:<.width$}", self.message)
     }
@@ -54,6 +77,10 @@ impl MessageBar {
     }
 
     pub fn render(&mut self) {
+        if self.state.created_at.elapsed() > self.state.duration {
+            self.update(MessageState::default());
+        }
+
         if !self.needs_redraw {
             return;
         }
@@ -85,9 +112,7 @@ mod tests {
     }
 
     fn state(message: &str) -> MessageState {
-        MessageState {
-            message: message.to_string(),
-        }
+        MessageState::create_default_duration(message.to_string())
     }
 
     #[test]
@@ -97,7 +122,12 @@ mod tests {
 
     #[test]
     fn new_bar_starts_with_empty_message() {
-        assert_eq!(bar().state, MessageState::default());
+        // Compare fields rather than whole states: each MessageState carries
+        // its own created_at Instant, so two freshly built states are never
+        // equal even when their content matches.
+        let state = bar().state;
+        assert_eq!(state.message, "");
+        assert_eq!(state.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
     }
 
     #[test]
@@ -129,11 +159,23 @@ mod tests {
     #[test]
     fn update_with_identical_state_does_not_mark_dirty() {
         let mut bar = bar();
-        bar.update(state("hello"));
+        let message = state("hello");
+        bar.update(message.clone());
         bar.render();
         assert!(!bar.needs_redraw);
-        bar.update(state("hello"));
+        bar.update(message);
         assert!(!bar.needs_redraw);
+    }
+
+    #[test]
+    fn update_with_same_text_but_fresh_state_marks_dirty() {
+        // A freshly built state (even with identical text) starts a new
+        // display timer, so it must be treated as a change.
+        let mut bar = bar();
+        bar.update(state("hello"));
+        bar.render();
+        bar.update(state("hello"));
+        assert!(bar.needs_redraw);
     }
 
     #[test]
@@ -167,5 +209,27 @@ mod tests {
     fn rendered_line_is_empty_when_message_is_empty() {
         let line = state("").as_line(10);
         assert_eq!(line, "");
+    }
+
+    #[test]
+    fn expired_message_is_cleared_on_render() {
+        let mut bar = bar();
+        let mut state = MessageState::create_message(String::from("hello"), 5);
+        // Backdate the message so it is already past its duration.
+        state.created_at = state
+            .created_at
+            .checked_sub(state.duration)
+            .expect("clock is far enough past the epoch to backdate 5s");
+        bar.update(state);
+        bar.render();
+        assert_eq!(bar.state.message, "");
+    }
+
+    #[test]
+    fn unexpired_message_survives_render() {
+        let mut bar = bar();
+        bar.update(MessageState::create_message(String::from("hello"), 5));
+        bar.render();
+        assert_eq!(bar.state.message, "hello");
     }
 }
