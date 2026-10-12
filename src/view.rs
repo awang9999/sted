@@ -68,6 +68,12 @@ impl View {
         }
     }
 
+    /// Whether the buffer is associated with a file on disk. A buffer
+    /// without a file name is a new, unsaved document.
+    pub fn has_file_name(&self) -> bool {
+        self.buffer.file_name.is_some()
+    }
+
     /// The view's current message, stored so its display timer survives
     /// across renders. Returning a clone (not a fresh state) is what keeps
     /// the message from being re-armed on every render pass.
@@ -126,11 +132,13 @@ impl View {
             EditorCommand::Resize(size) => self.resize(size),
             EditorCommand::Move(direction) => self.move_location(direction),
             EditorCommand::Insert(c) => self.handle_insert(c),
-            EditorCommand::NewLine => self.handle_newline(),
+            EditorCommand::Enter => self.handle_newline(),
             EditorCommand::Delete => self.handle_delete(),
             EditorCommand::BackSpace => self.handle_backspace(),
             EditorCommand::Save => self.handle_save(),
-            EditorCommand::Quit => (),
+            // Quit is handled by the editor. Escape is only meaningful to
+            // the command bar; the view ignores both.
+            EditorCommand::Quit | EditorCommand::Escape => (),
         }
     }
 
@@ -143,11 +151,7 @@ impl View {
     pub fn handle_quit(&mut self) -> bool {
         if self.buffer.modified && !self.quit_pending {
             self.quit_pending = true;
-            let file_name = self
-                .buffer
-                .file_name
-                .as_deref()
-                .unwrap_or("(unnamed)");
+            let file_name = self.buffer.file_name.as_deref().unwrap_or("(unnamed)");
             self.set_message(
                 format!("WARNING! File {file_name} has unsaved changes. Press Ctrl-Q again to quit without saving"),
                 LONG_MESSAGE_DURATION,
@@ -447,6 +451,14 @@ impl View {
         self.modified = true;
     }
 
+    /// Associates the buffer with `file_name` and saves it to that file,
+    /// reporting the outcome on the message bar. Used when the user named a
+    /// previously unnamed document through the command bar.
+    pub fn save_as(&mut self, file_name: &str) {
+        self.buffer.file_name = Some(file_name.to_string());
+        self.handle_save();
+    }
+
     /// Writes the buffer to its file and reports the outcome on the message
     /// bar: a brief success note naming the file, or an error that stays
     /// visible until the user has read it.
@@ -555,11 +567,66 @@ mod tests {
     }
 
     #[test]
+    fn save_as_names_the_buffer_and_reports_success() {
+        let path =
+            std::env::temp_dir().join(format!("sted_view_save_as_{}.txt", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["hello"]);
+        view.save_as(&file_path);
+
+        let message = view.get_message();
+        assert_eq!(
+            message.message,
+            format!("File saved successfully to {file_path}")
+        );
+        assert_eq!(
+            message.duration,
+            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
+        );
+        assert_eq!(view.buffer.file_name.as_deref(), Some(file_path.as_str()));
+        assert!(!view.buffer.modified);
+        assert!(path.exists());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_as_of_unwritable_path_keeps_the_name_and_reports_error() {
+        let mut view = make_view(&["hello"]);
+
+        view.save_as("/nonexistent_dir_sted/cannot_be_created.txt");
+
+        assert_eq!(view.get_message().message, "Error writing file!");
+        // The failed name is kept, so the next save retries the same path.
+        assert_eq!(
+            view.buffer.file_name.as_deref(),
+            Some("/nonexistent_dir_sted/cannot_be_created.txt")
+        );
+        assert!(view.buffer.modified);
+    }
+
+    #[test]
+    fn has_file_name_reflects_the_buffer() {
+        let mut view = make_view(&["a"]);
+        assert!(!view.has_file_name());
+        view.buffer.file_name = Some(String::from("x.txt"));
+        assert!(view.has_file_name());
+    }
+
+    #[test]
+    fn escape_is_ignored_by_the_view() {
+        let mut view = make_view(&["a"]);
+
+        view.handle_command(EditorCommand::Escape);
+
+        assert_eq!(view.get_message().message, "");
+    }
+
+    #[test]
     fn load_of_missing_file_reports_error_on_message_bar() {
-        let path = std::env::temp_dir().join(format!(
-            "sted_view_load_missing_{}.txt",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("sted_view_load_missing_{}.txt", std::process::id()));
         let file_path = path.to_string_lossy().to_string();
 
         let mut view = make_view(&["existing content"]);
@@ -571,10 +638,7 @@ mod tests {
             message.message,
             format!("Error: Could not open file: {file_path}")
         );
-        assert_eq!(
-            message.duration,
-            Duration::from_secs(LONG_MESSAGE_DURATION)
-        );
+        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
         // The buffer falls back to empty, unsaved state.
         assert!(view.buffer.is_empty());
         assert!(view.buffer.file_name.is_none());
@@ -582,8 +646,7 @@ mod tests {
 
     #[test]
     fn load_of_existing_file_replaces_buffer_and_keeps_name() {
-        let path = std::env::temp_dir()
-            .join(format!("sted_view_load_{}.txt", std::process::id()));
+        let path = std::env::temp_dir().join(format!("sted_view_load_{}.txt", std::process::id()));
         std::fs::write(&path, "one\ntwo\n").expect("create temp file");
         let file_path = path.to_string_lossy().to_string();
 
@@ -622,10 +685,7 @@ mod tests {
             message.message,
             "WARNING! File file.txt has unsaved changes. Press Ctrl-Q again to quit without saving"
         );
-        assert_eq!(
-            message.duration,
-            Duration::from_secs(LONG_MESSAGE_DURATION)
-        );
+        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 )]
 
 mod buffer;
+mod commandbar;
 mod common;
 mod editor;
 mod editorcommand;

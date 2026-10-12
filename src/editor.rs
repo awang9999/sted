@@ -1,4 +1,7 @@
-use crate::common::constants::{DEFAULT_MESSAGE_DURATION, EVENT_POLL_INTERVAL};
+use crate::commandbar::{CommandBar, CommandBarOutcome};
+use crate::common::constants::{
+    DEFAULT_MESSAGE_DURATION, EVENT_POLL_INTERVAL, LONG_MESSAGE_DURATION,
+};
 use crate::editorcommand::EditorCommand;
 use crate::terminal::Terminal;
 use crate::view::View;
@@ -10,6 +13,10 @@ use crossterm::event::{
 pub struct Editor {
     should_quit: bool,
     view: View,
+    /// Open when a save was requested for a document that has no file name
+    /// yet. While it is open, the command bar replaces the message bar and
+    /// collects the file name to save to.
+    command_bar: Option<CommandBar>,
 }
 
 impl Default for Editor {
@@ -18,6 +25,7 @@ impl Default for Editor {
         Self {
             should_quit: false,
             view: View::new(terminal_size),
+            command_bar: None,
         }
     }
 }
@@ -46,6 +54,7 @@ impl Editor {
         Ok(Self {
             should_quit: false,
             view,
+            command_bar: None,
         })
     }
 
@@ -86,24 +95,43 @@ impl Editor {
         let should_process = matches!(event, Key(_) | Resize(_, _));
 
         if should_process {
-            match EditorCommand::try_from(event) {
-                Ok(command) => {
-                    if matches!(command, EditorCommand::Quit) {
-                        // The view may refuse the first quit request when the
-                        // buffer has unsaved changes, warning on the message
-                        // bar that a second Ctrl-Q confirms the quit.
-                        if self.view.handle_quit() {
-                            self.should_quit = true;
-                        }
-                    } else {
-                        self.view.handle_command(command);
+            let command = match EditorCommand::try_from(event) {
+                Ok(command) => command,
+                Err(err) => {
+                    // While the command bar is up, the prompt is modal and
+                    // unknown keys are swallowed instead of being reported
+                    // on the (hidden) message bar.
+                    if self.command_bar.is_none() {
+                        self.view.set_message(err, DEFAULT_MESSAGE_DURATION);
+                    }
+                    return;
+                }
+            };
+
+            if self.command_bar.is_some() {
+                self.handle_command_bar_command(command);
+                return;
+            }
+
+            match command {
+                EditorCommand::Quit => {
+                    // The view may refuse the first quit request when the
+                    // buffer has unsaved changes, warning on the message
+                    // bar that a second Ctrl-Q confirms the quit.
+                    if self.view.handle_quit() {
+                        self.should_quit = true;
                     }
                 }
-                Err(err) => {
-                    // Report the unrecognized command on the message bar; it
-                    // stays visible for the default duration.
-                    self.view.set_message(err, DEFAULT_MESSAGE_DURATION);
+                EditorCommand::Save => {
+                    if self.view.has_file_name() {
+                        self.view.handle_command(EditorCommand::Save);
+                    } else {
+                        // A new document has no file to save to: ask the
+                        // user for a file name on the command bar.
+                        self.open_command_bar();
+                    }
                 }
+                _ => self.view.handle_command(command),
             }
         } else {
             #[cfg(debug_assertions)]
@@ -113,10 +141,54 @@ impl Editor {
         }
     }
 
+    /// Opens the save-as prompt, which takes over the message bar's row.
+    fn open_command_bar(&mut self) {
+        self.command_bar = Some(CommandBar::new(Terminal::size().unwrap_or_default()));
+    }
+
+    /// Routes a command to the active command bar and reacts to the
+    /// outcome: a confirmed prompt saves the buffer to the typed name, an
+    /// aborted one reports on the message bar.
+    fn handle_command_bar_command(&mut self, command: EditorCommand) {
+        // The viewport resizes together with the prompt.
+        if let EditorCommand::Resize(size) = command {
+            self.view.resize(size);
+        }
+
+        let outcome = self
+            .command_bar
+            .as_mut()
+            .expect("the command bar is open")
+            .handle_command(command);
+
+        match outcome {
+            CommandBarOutcome::Stay => {}
+            CommandBarOutcome::Save(file_name) => {
+                self.command_bar = None;
+                self.view.save_as(&file_name);
+            }
+            CommandBarOutcome::Abort => {
+                self.command_bar = None;
+                self.view
+                    .set_message(String::from("Save aborted"), LONG_MESSAGE_DURATION);
+            }
+        }
+    }
+
     fn refresh_screen(&mut self) {
         let _ = Terminal::hide_cursor();
         self.view.render();
-        let _ = Terminal::move_cursor_to_pos(&self.view.get_caret_position());
+        // While the command bar is active it replaces the message bar, so
+        // it draws after the view (which may still redraw the message bar)
+        // and it owns the terminal cursor.
+        let caret_position = match &mut self.command_bar {
+            Some(bar) => {
+                bar.render();
+                bar.get_caret_position()
+            }
+            None => self.view.get_caret_position(),
+        };
+        let _ = Terminal::move_cursor_to_pos(&caret_position);
         let _ = Terminal::show_cursor();
         let _ = Terminal::execute();
     }
@@ -156,6 +228,25 @@ mod tests {
         Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
     }
 
+    fn ctrl_s() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+    }
+
+    fn key(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn temp_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("{name}_{}.txt", std::process::id()))
+            .to_string_lossy()
+            .to_string()
+    }
+
     #[test]
     fn quit_with_unsaved_changes_requires_a_second_press() {
         let mut editor = Editor::default();
@@ -188,8 +279,8 @@ mod tests {
     #[test]
     fn quit_without_unsaved_changes_exits_on_first_press() {
         let mut editor = Editor::default();
-        let path = std::env::temp_dir()
-            .join(format!("sted_editor_quit_clean_{}.txt", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("sted_editor_quit_clean_{}.txt", std::process::id()));
         std::fs::write(&path, "hello\n").expect("create temp file");
         let file_path = path.to_string_lossy().to_string();
         editor.view.load(&file_path);
@@ -199,5 +290,142 @@ mod tests {
         assert!(editor.should_quit);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_without_file_name_opens_the_command_bar() {
+        let mut editor = Editor::default();
+        let message_before = editor.view.get_message();
+
+        editor.evaluate_event(ctrl_s());
+
+        assert!(editor.command_bar.is_some());
+        // Opening the prompt must not touch the buffer or the message bar.
+        assert_eq!(editor.view.get_status().total_lines, 0);
+        assert_eq!(editor.view.get_message(), message_before);
+    }
+
+    #[test]
+    fn save_with_file_name_does_not_open_the_command_bar() {
+        let mut editor = Editor::default();
+        let path = temp_path("sted_editor_save_named");
+        std::fs::write(&path, "hello\n").expect("create temp file");
+        editor.view.load(&path);
+
+        editor.evaluate_event(ctrl_s());
+
+        assert!(editor.command_bar.is_none());
+        assert_eq!(
+            editor.view.get_message().message,
+            format!("File saved successfully to {path}")
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn characters_typed_into_the_command_bar_do_not_reach_the_buffer() {
+        let mut editor = Editor::default();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(key('x'));
+
+        assert_eq!(
+            editor
+                .command_bar
+                .as_ref()
+                .expect("the command bar is open")
+                .get_text(),
+            "x"
+        );
+        assert_eq!(editor.view.get_status().total_lines, 0);
+    }
+
+    #[test]
+    fn enter_with_a_file_name_saves_to_it_and_closes_the_command_bar() {
+        let mut editor = Editor::default();
+        editor.view.handle_command(EditorCommand::Insert('h'));
+        editor.evaluate_event(ctrl_s());
+
+        let path = temp_path("sted_editor_saveas");
+        for c in path.chars() {
+            editor.evaluate_event(key(c));
+        }
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        assert!(editor.command_bar.is_none());
+        assert_eq!(
+            editor.view.get_message().message,
+            format!("File saved successfully to {path}")
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("saved file"), "h\n");
+        assert!(!editor.view.get_status().is_modified);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn enter_without_a_file_name_keeps_the_command_bar_open() {
+        let mut editor = Editor::default();
+        let message_before = editor.view.get_message();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        assert!(editor.command_bar.is_some());
+        assert_eq!(editor.view.get_message(), message_before);
+    }
+
+    #[test]
+    fn escape_closes_the_command_bar_and_reports_save_aborted() {
+        let mut editor = Editor::default();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(press(KeyCode::Esc));
+
+        assert!(editor.command_bar.is_none());
+        let message = editor.view.get_message();
+        assert_eq!(message.message, "Save aborted");
+        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+    }
+
+    #[test]
+    fn unknown_keys_are_swallowed_while_the_command_bar_is_open() {
+        let mut editor = Editor::default();
+        let message_before = editor.view.get_message();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+
+        assert!(editor.command_bar.is_some());
+        assert_eq!(editor.view.get_message(), message_before);
+    }
+
+    #[test]
+    fn ctrl_q_aborts_the_command_bar_without_quitting() {
+        let mut editor = Editor::default();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(ctrl_q());
+
+        // The prompt is dismissed (and the buffer left untouched) but the
+        // editor itself must not quit on the first Ctrl-Q.
+        assert!(editor.command_bar.is_none());
+        assert!(!editor.should_quit);
+        assert_eq!(editor.view.get_message().message, "Save aborted");
+    }
+
+    #[test]
+    fn resize_while_the_command_bar_is_open_reaches_the_command_bar() {
+        let mut editor = Editor::default();
+
+        editor.evaluate_event(ctrl_s());
+        editor.evaluate_event(Event::Resize(100, 30));
+
+        let bar = editor
+            .command_bar
+            .as_ref()
+            .expect("the command bar is open");
+        assert_eq!(bar.get_caret_position().row, 29);
     }
 }

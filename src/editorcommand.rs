@@ -20,11 +20,12 @@ pub enum EditorCommand {
     Move(Direction),
     Resize(Size),
     Insert(char),
-    NewLine,
+    Enter,
     Delete,
     BackSpace,
     Quit,
     Save,
+    Escape,
 }
 
 impl TryFrom<Event> for EditorCommand {
@@ -38,6 +39,7 @@ impl TryFrom<Event> for EditorCommand {
                 // Program control
                 (KeyCode::Char('q'), KeyModifiers::CONTROL) => Ok(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Ok(Self::Save),
+                (KeyCode::Esc, KeyModifiers::NONE) => Ok(Self::Escape),
                 // Caret movement
                 (KeyCode::Up, KeyModifiers::NONE) => Ok(Self::Move(Direction::Up)),
                 (KeyCode::Down, KeyModifiers::NONE) => Ok(Self::Move(Direction::Down)),
@@ -52,7 +54,7 @@ impl TryFrom<Event> for EditorCommand {
                 // Tab inserts a literal tab character
                 (KeyCode::Tab, KeyModifiers::NONE) => Ok(Self::Insert('\t')),
                 // Enter
-                (KeyCode::Enter, KeyModifiers::NONE) => Ok(Self::NewLine),
+                (KeyCode::Enter, KeyModifiers::NONE) => Ok(Self::Enter),
                 // Delete
                 (KeyCode::Delete, KeyModifiers::NONE) => Ok(Self::Delete),
                 // Backspace
@@ -87,10 +89,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_maps_to_newline() {
+    fn enter_maps_to_enter() {
         let command =
             EditorCommand::try_from(press(KeyCode::Enter)).expect("Enter should be supported");
-        assert!(matches!(command, EditorCommand::NewLine));
+        assert!(matches!(command, EditorCommand::Enter));
     }
 
     #[test]
@@ -108,10 +110,15 @@ mod tests {
 
     #[test]
     fn ctrl_s_maps_to_save() {
-        let event =
-            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        let command =
-            EditorCommand::try_from(event).expect("Ctrl-S should be supported");
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let command = EditorCommand::try_from(event).expect("Ctrl-S should be supported");
         assert!(matches!(command, EditorCommand::Save));
+    }
+
+    #[test]
+    fn esc_maps_to_escape() {
+        let command =
+            EditorCommand::try_from(press(KeyCode::Esc)).expect("Esc should be supported");
+        assert!(matches!(command, EditorCommand::Escape));
     }
 }

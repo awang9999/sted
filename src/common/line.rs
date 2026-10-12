@@ -77,8 +77,7 @@ impl Line {
         while let Some(fragment) = pending.next() {
             let mut current = fragment.clone();
             while let Some(next) = pending.peek()
-                && (current.grapheme.ends_with('\u{200d}')
-                    || next.grapheme.starts_with('\u{200d}'))
+                && (current.grapheme.ends_with('\u{200d}') || next.grapheme.starts_with('\u{200d}'))
             {
                 let combined_str = format!("{}{}", current.grapheme, next.grapheme);
 
@@ -144,6 +143,17 @@ impl Line {
         self.content.len()
     }
 
+    /// The rendered form of the line's graphemes from `grapheme_index` to
+    /// its end: tabs and control characters already replaced by their
+    /// display text. Indices past the end of the line yield an empty string.
+    pub fn display_text_from(&self, grapheme_index: usize) -> String {
+        self.content
+            .iter()
+            .skip(grapheme_index.min(self.content.len()))
+            .map(TextFragment::get_display_text)
+            .collect()
+    }
+
     pub fn width_until(&self, grapheme_index: usize) -> usize {
         self.content
             .iter()
@@ -185,7 +195,12 @@ impl Line {
             .map(|fragment| fragment.grapheme.as_str())
             .collect();
         result.push(c);
-        result.extend(self.content.iter().skip(index).map(|fragment| fragment.grapheme.as_str()));
+        result.extend(
+            self.content
+                .iter()
+                .skip(index)
+                .map(|fragment| fragment.grapheme.as_str()),
+        );
 
         self.content = Self::convert_string_to_content(&result);
     }
@@ -223,10 +238,7 @@ mod tests {
         assert_eq!(line.grapheme_count(), 5);
 
         line.delete_grapheme(2); // removes 'l'
-        assert_eq!(
-            line.to_string(),
-            "helo"
-        );
+        assert_eq!(line.to_string(), "helo");
     }
 
     #[test]
@@ -234,24 +246,15 @@ mod tests {
         let mut line = Line::from("abc");
 
         line.delete_grapheme(0); // remove 'a'
-        assert_eq!(
-            line.to_string(),
-            "bc"
-        );
+        assert_eq!(line.to_string(), "bc");
 
         let mut line = Line::from("abc");
         line.delete_grapheme(2); // remove 'c' — left with ["a", "b"]
-        assert_eq!(
-            line.to_string(),
-            "ab"
-        );
+        assert_eq!(line.to_string(), "ab");
 
         // On the same line, delete at index 0 removes 'a', leaving ['b']
         line.delete_grapheme(0);
-        assert_eq!(
-            line.to_string(),
-            "b"
-        );
+        assert_eq!(line.to_string(), "b");
     }
 
     #[test]
@@ -291,40 +294,28 @@ mod tests {
     fn insert_char_at_beginning() {
         let mut line = Line::from("bc");
         line.insert_char(0, 'a');
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
+        assert_eq!(line.to_string(), "abc");
     }
 
     #[test]
     fn insert_char_in_middle() {
         let mut line = Line::from("ac");
         line.insert_char(1, 'b');
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
+        assert_eq!(line.to_string(), "abc");
     }
 
     #[test]
     fn insert_char_at_end() {
         let mut line = Line::from("ab");
         line.insert_char(2, 'c');
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
+        assert_eq!(line.to_string(), "abc");
     }
 
     #[test]
     fn insert_char_into_empty_line() {
         let mut line = Line::from("");
         line.insert_char(0, 'x');
-        assert_eq!(
-            line.to_string(),
-            "x"
-        );
+        assert_eq!(line.to_string(), "x");
         assert_eq!(line.grapheme_count(), 1);
     }
 
@@ -334,10 +325,7 @@ mod tests {
         // Insert past the end — should still append at EOF
         line.insert_char(10, 'z');
         assert_eq!(line.grapheme_count(), 4);
-        assert_eq!(
-            line.to_string(),
-            "abcz"
-        );
+        assert_eq!(line.to_string(), "abcz");
     }
 
     #[test]
@@ -346,10 +334,7 @@ mod tests {
         // Empty line: index 5 is out of bounds, should still work
         line.insert_char(5, 'w');
         assert_eq!(line.grapheme_count(), 1);
-        assert_eq!(
-            line.to_string(),
-            "w"
-        );
+        assert_eq!(line.to_string(), "w");
     }
 
     #[test]
@@ -358,27 +343,18 @@ mod tests {
         line.insert_char(0, 'c');
         line.insert_char(0, 'b');
         line.insert_char(0, 'a');
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
+        assert_eq!(line.to_string(), "abc");
     }
 
     #[test]
     fn insert_char_preserves_existing_graphemes() {
         let mut line = Line::from("hello");
         line.insert_char(3, 'X');
-        assert_eq!(
-            line.to_string(),
-            "helXlo"
-        );
+        assert_eq!(line.to_string(), "helXlo");
 
         // Verify remaining graphemes are intact
         line.insert_char(6, 'Y');
-        assert_eq!(
-            line.to_string(),
-            "helXloY"
-        );
+        assert_eq!(line.to_string(), "helXloY");
     }
 
     #[test]
@@ -424,24 +400,15 @@ mod tests {
         // Insert between two normal chars on any existing grapheme count
         let mut line = Line::from("hello");
         line.insert_char(0, 'H');
-        assert_eq!(
-            line.to_string(),
-            "Hhello"
-        );
+        assert_eq!(line.to_string(), "Hhello");
     }
 
     #[test]
     fn split_at_mid_line_splits_into_prefix_and_remainder() {
         let mut line = Line::from("abcdef");
         let after = line.split_at(3);
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
-        assert_eq!(
-            after.to_string(),
-            "def"
-        );
+        assert_eq!(line.to_string(), "abc");
+        assert_eq!(after.to_string(), "def");
     }
 
     #[test]
@@ -449,20 +416,14 @@ mod tests {
         let mut line = Line::from("abcdef");
         let after = line.split_at(0);
         assert_eq!(line.grapheme_count(), 0);
-        assert_eq!(
-            after.to_string(),
-            "abcdef"
-        );
+        assert_eq!(after.to_string(), "abcdef");
     }
 
     #[test]
     fn split_at_end_of_line_yields_empty_remainder() {
         let mut line = Line::from("abcdef");
         let after = line.split_at(6);
-        assert_eq!(
-            line.to_string(),
-            "abcdef"
-        );
+        assert_eq!(line.to_string(), "abcdef");
         assert_eq!(after.grapheme_count(), 0);
     }
 
@@ -478,10 +439,7 @@ mod tests {
     fn split_at_out_of_bounds_clamps_to_end_of_line() {
         let mut line = Line::from("abc");
         let after = line.split_at(100);
-        assert_eq!(
-            line.to_string(),
-            "abc"
-        );
+        assert_eq!(line.to_string(), "abc");
         assert_eq!(after.grapheme_count(), 0);
     }
 
@@ -493,14 +451,8 @@ mod tests {
 
         let after = line.split_at(2);
 
-        assert_eq!(
-            line.to_string(),
-            "a👨‍👩‍👧"
-        );
-        assert_eq!(
-            after.to_string(),
-            "b"
-        );
+        assert_eq!(line.to_string(), "a👨‍👩‍👧");
+        assert_eq!(after.to_string(), "b");
     }
 
     #[test]
@@ -524,5 +476,25 @@ mod tests {
     fn get_renders_a_tab_as_tab_width_spaces() {
         let line = Line::from("a\tb");
         assert_eq!(line.get(0..10), "a    b");
+    }
+
+    #[test]
+    fn display_text_from_yields_the_whole_rendered_line_from_zero() {
+        let line = Line::from("a\tb");
+        assert_eq!(line.display_text_from(0), "a    b");
+    }
+
+    #[test]
+    fn display_text_from_skips_the_graphemes_before_the_index() {
+        let line = Line::from("a\tb");
+        assert_eq!(line.display_text_from(1), "    b");
+        assert_eq!(line.display_text_from(2), "b");
+    }
+
+    #[test]
+    fn display_text_from_past_the_end_is_empty() {
+        let line = Line::from("ab");
+        assert_eq!(line.display_text_from(2), "");
+        assert_eq!(line.display_text_from(100), "");
     }
 }

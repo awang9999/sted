@@ -17,7 +17,7 @@ pub struct Size {
 }
 // A Position here represents a location relative to the top left of the terminal window.
 // col: 0, row: 0 represents the top left character.
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct Position {
     pub col: usize,
     pub row: usize,
