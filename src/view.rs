@@ -1,5 +1,7 @@
 use crate::buffer::Buffer;
-use crate::common::constants::{DEFAULT_MESSAGE_DURATION, RESERVED_BOTTOM_LINES};
+use crate::common::constants::{
+    DEFAULT_MESSAGE_DURATION, LONG_MESSAGE_DURATION, RESERVED_BOTTOM_LINES,
+};
 use crate::common::line::Line;
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
@@ -21,6 +23,9 @@ pub struct View {
     status_bar: StatusBar,
     message_bar: MessageBar,
     message: MessageState,
+    /// Set when a quit request was refused because of unsaved changes; a
+    /// second consecutive Ctrl-Q then confirms the quit.
+    quit_pending: bool,
 }
 
 impl Default for View {
@@ -41,6 +46,7 @@ impl View {
             status_bar: StatusBar::new(size),
             message_bar: MessageBar::new(size),
             message: MessageState::create_default_duration(String::from(DEFAULT_MESSAGE)),
+            quit_pending: false,
         }
     }
 
@@ -91,7 +97,16 @@ impl View {
     }
 
     pub fn load(&mut self, file_name: &str) {
-        self.buffer = Buffer::load(file_name);
+        match Buffer::load(file_name) {
+            Ok(buffer) => self.buffer = buffer,
+            Err(error) => {
+                // The file could not be opened: fall back to an empty buffer
+                // (so nothing fabricated can ever be saved to disk) and keep
+                // the error visible until the user has read it.
+                self.buffer = Buffer::default();
+                self.set_message(error, LONG_MESSAGE_DURATION);
+            }
+        }
         self.modified = true;
     }
 
@@ -104,6 +119,9 @@ impl View {
     }
 
     pub fn handle_command(&mut self, event: EditorCommand) {
+        // Any other activity supersedes a pending quit warning, so the user
+        // must press Ctrl-Q twice again to quit after it.
+        self.quit_pending = false;
         match event {
             EditorCommand::Resize(size) => self.resize(size),
             EditorCommand::Move(direction) => self.move_location(direction),
@@ -111,15 +129,32 @@ impl View {
             EditorCommand::NewLine => self.handle_newline(),
             EditorCommand::Delete => self.handle_delete(),
             EditorCommand::BackSpace => self.handle_backspace(),
+            EditorCommand::Save => self.handle_save(),
             EditorCommand::Quit => (),
-            EditorCommand::Save => {
-                // Saving errors are suppressed for now; they will be
-                // reported to the user later in this chapter.
-                let _ = self.buffer.save();
-                // Briefly confirm the save on the message bar.
-                self.set_message(String::from("Saved!"), DEFAULT_MESSAGE_DURATION);
-            }
         }
+    }
+
+    /// Handles a quit request and reports whether the editor should exit.
+    ///
+    /// When the buffer has unsaved changes, the first request is refused and
+    /// a warning is shown on the message bar; a second consecutive request
+    /// confirms the quit. Any other command in between (see
+    /// `handle_command`) resets the warning.
+    pub fn handle_quit(&mut self) -> bool {
+        if self.buffer.modified && !self.quit_pending {
+            self.quit_pending = true;
+            let file_name = self
+                .buffer
+                .file_name
+                .as_deref()
+                .unwrap_or("(unnamed)");
+            self.set_message(
+                format!("WARNING! File {file_name} has unsaved changes. Press Ctrl-Q again to quit without saving"),
+                LONG_MESSAGE_DURATION,
+            );
+            return false;
+        }
+        true
     }
 
     pub fn render_buffer(&mut self) {
@@ -411,12 +446,33 @@ impl View {
         // guarantees a re-render.
         self.modified = true;
     }
+
+    /// Writes the buffer to its file and reports the outcome on the message
+    /// bar: a brief success note naming the file, or an error that stays
+    /// visible until the user has read it.
+    fn handle_save(&mut self) {
+        match self.buffer.save() {
+            Ok(()) => {
+                // Briefly confirm the save on the message bar.
+                let file_name = self.buffer.file_name.as_deref().unwrap_or_default();
+                self.set_message(
+                    format!("File saved successfully to {file_name}"),
+                    DEFAULT_MESSAGE_DURATION,
+                );
+            }
+            Err(_) => {
+                // Keep the error on the bar until the user has read it:
+                // it stays until a new message replaces it.
+                self.set_message(String::from("Error writing file!"), LONG_MESSAGE_DURATION);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::constants::TAB_WIDTH_SPACES;
+    use crate::common::constants::{LONG_MESSAGE_DURATION, TAB_WIDTH_SPACES};
     use crate::common::line::Line;
     use std::time::Duration;
 
@@ -436,6 +492,7 @@ mod tests {
             size: terminal_size,
             location: Location::default(),
             scroll_offset: Position::default(),
+            quit_pending: false,
             desired_x: 0,
             status_bar: StatusBar::new(terminal_size),
             message_bar: MessageBar::new(terminal_size),
@@ -457,6 +514,163 @@ mod tests {
         let message = view.get_message();
         assert_eq!(message.message, "Saved!");
         assert_eq!(message.duration, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn save_with_file_name_shows_success_message_with_file_name() {
+        let path =
+            std::env::temp_dir().join(format!("sted_view_save_test_{}.txt", std::process::id()));
+        std::fs::write(&path, "hello\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["hello"]);
+        view.buffer.file_name = Some(file_path.clone());
+
+        view.handle_save();
+
+        let message = view.get_message();
+        assert_eq!(
+            message.message,
+            format!("File saved successfully to {file_path}")
+        );
+        assert_eq!(
+            message.duration,
+            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
+        );
+        assert!(!view.buffer.modified);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_without_file_name_shows_error_message() {
+        let mut view = make_view(&["hello"]);
+
+        view.handle_save();
+
+        let message = view.get_message();
+        assert_eq!(message.message, "Error writing file!");
+        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+        assert!(view.buffer.modified);
+    }
+
+    #[test]
+    fn load_of_missing_file_reports_error_on_message_bar() {
+        let path = std::env::temp_dir().join(format!(
+            "sted_view_load_missing_{}.txt",
+            std::process::id()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["existing content"]);
+
+        view.load(&file_path);
+
+        let message = view.get_message();
+        assert_eq!(
+            message.message,
+            format!("Error: Could not open file: {file_path}")
+        );
+        assert_eq!(
+            message.duration,
+            Duration::from_secs(LONG_MESSAGE_DURATION)
+        );
+        // The buffer falls back to empty, unsaved state.
+        assert!(view.buffer.is_empty());
+        assert!(view.buffer.file_name.is_none());
+    }
+
+    #[test]
+    fn load_of_existing_file_replaces_buffer_and_keeps_name() {
+        let path = std::env::temp_dir()
+            .join(format!("sted_view_load_{}.txt", std::process::id()));
+        std::fs::write(&path, "one\ntwo\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["existing content"]);
+
+        view.load(&file_path);
+
+        let texts: Vec<String> = view.buffer.lines.iter().map(ToString::to_string).collect();
+        assert_eq!(texts, vec!["one", "two"]);
+        assert_eq!(view.buffer.file_name.as_deref(), Some(file_path.as_str()));
+        // A successful load must not touch the message bar.
+        assert_eq!(view.get_message().message, "");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn quit_without_unsaved_changes_exits_immediately() {
+        let mut view = make_view(&["abc"]);
+        view.buffer.modified = false;
+
+        assert!(view.handle_quit());
+        // No warning should have been raised.
+        assert_eq!(view.get_message().message, "");
+    }
+
+    #[test]
+    fn quit_with_unsaved_changes_warns_and_refuses_first_request() {
+        let mut view = make_view(&["abc"]);
+        view.buffer.file_name = Some(String::from("file.txt"));
+
+        assert!(!view.handle_quit());
+
+        let message = view.get_message();
+        assert_eq!(
+            message.message,
+            "WARNING! File file.txt has unsaved changes. Press Ctrl-Q again to quit without saving"
+        );
+        assert_eq!(
+            message.duration,
+            Duration::from_secs(LONG_MESSAGE_DURATION)
+        );
+    }
+
+    #[test]
+    fn quit_with_unsaved_changes_and_no_file_name_names_it_unnamed() {
+        let mut view = make_view(&["abc"]);
+
+        assert!(!view.handle_quit());
+        assert_eq!(
+            view.get_message().message,
+            "WARNING! File (unnamed) has unsaved changes. Press Ctrl-Q again to quit without saving"
+        );
+    }
+
+    #[test]
+    fn second_consecutive_quit_request_exits() {
+        let mut view = make_view(&["abc"]);
+
+        assert!(!view.handle_quit());
+        assert!(view.handle_quit());
+    }
+
+    #[test]
+    fn other_command_resets_pending_quit_warning() {
+        let mut view = make_view(&["abc"]);
+
+        assert!(!view.handle_quit()); // first press: warn
+        view.handle_command(EditorCommand::Insert('x')); // activity in between
+        assert!(!view.handle_quit()); // must warn again
+        assert!(view.handle_quit()); // and the next press confirms
+    }
+
+    #[test]
+    fn saving_clears_unsaved_changes_and_allows_immediate_quit() {
+        let path = std::env::temp_dir().join(format!("sted_view_quit_{}.txt", std::process::id()));
+        std::fs::write(&path, "abc\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["abc"]);
+        view.buffer.file_name = Some(file_path.clone());
+
+        assert!(!view.handle_quit()); // first press: warn
+        view.handle_save(); // user saves instead
+        assert!(view.handle_quit()); // nothing left to warn about
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

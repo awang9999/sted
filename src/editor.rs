@@ -89,7 +89,12 @@ impl Editor {
             match EditorCommand::try_from(event) {
                 Ok(command) => {
                     if matches!(command, EditorCommand::Quit) {
-                        self.should_quit = true;
+                        // The view may refuse the first quit request when the
+                        // buffer has unsaved changes, warning on the message
+                        // bar that a second Ctrl-Q confirms the quit.
+                        if self.view.handle_quit() {
+                            self.should_quit = true;
+                        }
                     } else {
                         self.view.handle_command(command);
                     }
@@ -145,5 +150,54 @@ mod tests {
             message.duration,
             Duration::from_secs(DEFAULT_MESSAGE_DURATION)
         );
+    }
+
+    fn ctrl_q() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn quit_with_unsaved_changes_requires_a_second_press() {
+        let mut editor = Editor::default();
+        let path =
+            std::env::temp_dir().join(format!("sted_editor_quit_{}.txt", std::process::id()));
+        std::fs::write(&path, "hello\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+        editor.view.load(&file_path);
+
+        // Make the buffer modified so quitting needs confirmation.
+        editor.view.handle_command(EditorCommand::Insert('x'));
+
+        // First Ctrl-Q: warned, not quitting yet.
+        editor.evaluate_event(ctrl_q());
+        assert!(!editor.should_quit);
+        assert_eq!(
+            editor.view.get_message().message,
+            format!(
+                "WARNING! File {file_path} has unsaved changes. Press Ctrl-Q again to quit without saving"
+            )
+        );
+
+        // Second Ctrl-Q: quits.
+        editor.evaluate_event(ctrl_q());
+        assert!(editor.should_quit);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn quit_without_unsaved_changes_exits_on_first_press() {
+        let mut editor = Editor::default();
+        let path = std::env::temp_dir()
+            .join(format!("sted_editor_quit_clean_{}.txt", std::process::id()));
+        std::fs::write(&path, "hello\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+        editor.view.load(&file_path);
+
+        editor.evaluate_event(ctrl_q());
+
+        assert!(editor.should_quit);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -17,27 +17,21 @@ impl Buffer {
         self.lines.is_empty()
     }
 
-    pub fn load(file_path: &str) -> Self {
-        let mut lines: Vec<Line> = Vec::new();
-        let mut modified = false;
+    /// Reads the file at `file_path` into a new buffer.
+    ///
+    /// Returns an error with a user-facing message if the file could not be
+    /// opened; the caller reports that message on the message bar and keeps
+    /// an empty buffer.
+    pub fn load(file_path: &str) -> Result<Self, String> {
+        let file_content = read_to_string(file_path)
+            .map_err(|_| format!("Error: Could not open file: {file_path}"))?;
+        let lines: Vec<Line> = file_content.lines().map(Line::from).collect();
 
-        match read_to_string(file_path) {
-            Ok(file_content) => {
-                lines.extend(file_content.lines().map(Line::from));
-            }
-            Err(error) => {
-                lines.push(Line::from(&format!("Failed to read file at {file_path}")));
-                lines.push(Line::from(&format!("Error message: {error}")));
-                // The buffer holds fabricated error text, not the file's content.
-                modified = true;
-            }
-        }
-
-        Self {
+        Ok(Self {
             lines,
-            modified,
+            modified: false,
             file_name: Some(file_path.to_string()),
-        }
+        })
     }
 
     /// Writes all lines of the buffer to the file it was loaded from.
@@ -438,10 +432,24 @@ mod tests {
         std::fs::write(&path, "hello\n").unwrap();
         let file_path = path.to_string_lossy().to_string();
 
-        let buf = Buffer::load(&file_path);
+        let buf = Buffer::load(&file_path).expect("load should succeed");
         assert_eq!(buf.file_name.as_deref(), Some(file_path.as_str()));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_of_missing_file_is_an_error_naming_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("sted_test_missing_{}.txt", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+
+        let result = Buffer::load(&file_path);
+
+        assert_eq!(
+            result.err(),
+            Some(format!("Error: Could not open file: {file_path}"))
+        );
     }
 
     #[test]
@@ -456,7 +464,7 @@ mod tests {
         std::fs::write(&path, "line one\nline two\n").unwrap();
         let file_path = path.to_string_lossy().to_string();
 
-        let mut buf = Buffer::load(&file_path);
+        let mut buf = Buffer::load(&file_path).expect("load should succeed");
         buf.insert_char(Location { x: 0, y: 1 }, 'X');
         buf.save().expect("save should succeed");
 
