@@ -13,6 +13,7 @@ mod common;
 mod editor;
 mod editorcommand;
 mod messagebar;
+mod prompt;
 mod statusbar;
 mod terminal;
 mod view;

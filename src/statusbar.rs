@@ -1,5 +1,12 @@
-use crate::common::constants::RESERVED_BOTTOM_LINES;
+use crate::common::display::fit_to_width;
+use crate::common::layout::{BarLayout, STATUS_BAR_OFFSET};
 use crate::terminal::{Size, Terminal};
+use unicode_width::UnicodeWidthStr;
+
+/// Shown in place of a file name the document does not have yet.
+const NO_FILE: &str = "[No file]";
+/// The maximum number of display columns a file name may occupy.
+const FILE_NAME_WIDTH: usize = 50;
 
 /// The information the status bar displays about the current document.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -13,7 +20,10 @@ pub struct DocumentStatus {
 
 impl DocumentStatus {
     fn as_line(&self, width: usize) -> String {
-        let file = self.file_name.as_deref().unwrap_or("[No file]");
+        let file = fit_to_width(
+            self.file_name.as_deref().unwrap_or(NO_FILE),
+            FILE_NAME_WIDTH,
+        );
         let state = if self.is_modified {
             "modified"
         } else {
@@ -25,11 +35,10 @@ impl DocumentStatus {
             self.total_lines
         );
         let middle = format!(" - {} lines | ({state})", self.total_lines);
-        let filename_length = file.len().min(50); // truncated past 50
         let align_width = width
-            .saturating_sub(middle.len())
-            .saturating_sub(filename_length);
-        format!("{file:<.50}{middle}{line_frac:>align_width$}")
+            .saturating_sub(middle.width())
+            .saturating_sub(file.width());
+        format!("{file}{middle}{line_frac:>align_width$}")
     }
 }
 
@@ -37,8 +46,7 @@ impl DocumentStatus {
 pub struct StatusBar {
     state: DocumentStatus,
     needs_redraw: bool,
-    width: usize,
-    row: usize,
+    layout: BarLayout,
 }
 
 impl StatusBar {
@@ -46,20 +54,12 @@ impl StatusBar {
         Self {
             state: DocumentStatus::default(),
             needs_redraw: true,
-            width: size.width,
-            row: Self::bar_row(size),
+            layout: BarLayout::new(size, STATUS_BAR_OFFSET),
         }
     }
 
-    /// The row the bar is rendered on: the first of the rows reserved at the
-    /// bottom of the terminal.
-    fn bar_row(terminal: Size) -> usize {
-        terminal.height.saturating_sub(RESERVED_BOTTOM_LINES)
-    }
-
     pub fn resize(&mut self, size: Size) {
-        self.width = size.width;
-        self.row = Self::bar_row(size);
+        self.layout.resize(size);
         self.needs_redraw = true;
     }
 
@@ -75,18 +75,15 @@ impl StatusBar {
             return;
         }
 
-        let _ = Terminal::clear_row(self.row);
-        let mut text = self.state.as_line(self.width);
-        text.truncate(self.width);
-        let result = Terminal::print_inverted_row(self.row, &text);
+        let row = self.layout.row();
+        let _ = Terminal::clear_row(row);
+        let text = fit_to_width(
+            &self.state.as_line(self.layout.width()),
+            self.layout.width(),
+        );
+        let result = Terminal::print_inverted_row(row, &text);
         debug_assert!(result.is_ok(), "Failed to render status bar");
         self.needs_redraw = false;
-    }
-}
-
-impl Default for StatusBar {
-    fn default() -> Self {
-        Self::new(Terminal::size().unwrap_or_default())
     }
 }
 
@@ -117,7 +114,7 @@ mod tests {
 
     #[test]
     fn bar_sits_on_the_first_reserved_row() {
-        assert_eq!(bar().row, 22);
+        assert_eq!(bar().layout.row(), 22);
     }
 
     #[test]
@@ -127,8 +124,8 @@ mod tests {
             width: 100,
             height: 30,
         });
-        assert_eq!(bar.row, 28);
-        assert_eq!(bar.width, 100);
+        assert_eq!(bar.layout.row(), 28);
+        assert_eq!(bar.layout.width(), 100);
         assert!(bar.needs_redraw);
     }
 
@@ -169,5 +166,21 @@ mod tests {
         assert!(line.contains("1 line"));
         assert!(line.contains("1/1"));
         assert!(line.contains("unmodified"));
+    }
+
+    #[test]
+    fn rendered_line_is_padded_to_the_width() {
+        let line = status(Some("file.txt"), 5, 2, true).as_line(80);
+        assert_eq!(line.width(), 80);
+    }
+
+    #[test]
+    fn full_width_file_names_do_not_break_the_layout() {
+        // Each CJK character occupies two columns, so the line must still
+        // fit its width without truncating a character.
+        let line = status(Some("中文文件.txt"), 5, 2, true).as_line(80);
+        assert!(line.contains("中文文件.txt"));
+        assert!(line.contains("3/5"));
+        assert_eq!(line.width(), 80);
     }
 }

@@ -1,8 +1,6 @@
-use crate::commandbar::{CommandBar, CommandBarOutcome};
-use crate::common::constants::{
-    DEFAULT_MESSAGE_DURATION, EVENT_POLL_INTERVAL, LONG_MESSAGE_DURATION,
-};
+use crate::common::constants::{DEFAULT_MESSAGE_DURATION, EVENT_POLL_INTERVAL};
 use crate::editorcommand::EditorCommand;
+use crate::prompt::{PromptPurpose, PromptSession};
 use crate::terminal::Terminal;
 use crate::view::View;
 use crossterm::event::{
@@ -13,10 +11,10 @@ use crossterm::event::{
 pub struct Editor {
     should_quit: bool,
     view: View,
-    /// Open when a save was requested for a document that has no file name
-    /// yet. While it is open, the command bar replaces the message bar and
-    /// collects the file name to save to.
-    command_bar: Option<CommandBar>,
+    /// Open whenever the editor needs a single line of input from the
+    /// user. While it is open, the command bar replaces the message bar
+    /// and the prompt is modal: no command reaches the view.
+    prompt: Option<PromptSession>,
 }
 
 impl Default for Editor {
@@ -25,7 +23,7 @@ impl Default for Editor {
         Self {
             should_quit: false,
             view: View::new(terminal_size),
-            command_bar: None,
+            prompt: None,
         }
     }
 }
@@ -54,7 +52,7 @@ impl Editor {
         Ok(Self {
             should_quit: false,
             view,
-            command_bar: None,
+            prompt: None,
         })
     }
 
@@ -98,18 +96,18 @@ impl Editor {
             let command = match EditorCommand::try_from(event) {
                 Ok(command) => command,
                 Err(err) => {
-                    // While the command bar is up, the prompt is modal and
-                    // unknown keys are swallowed instead of being reported
-                    // on the (hidden) message bar.
-                    if self.command_bar.is_none() {
+                    // While a prompt is up, it is modal and unknown keys
+                    // are swallowed instead of being reported on the
+                    // (hidden) message bar.
+                    if self.prompt.is_none() {
                         self.view.set_message(err, DEFAULT_MESSAGE_DURATION);
                     }
                     return;
                 }
             };
 
-            if self.command_bar.is_some() {
-                self.handle_command_bar_command(command);
+            if self.prompt.is_some() {
+                self.handle_prompt_command(command);
                 return;
             }
 
@@ -128,7 +126,7 @@ impl Editor {
                     } else {
                         // A new document has no file to save to: ask the
                         // user for a file name on the command bar.
-                        self.open_command_bar();
+                        self.open_prompt(PromptPurpose::SaveAs);
                     }
                 }
                 _ => self.view.handle_command(command),
@@ -141,51 +139,32 @@ impl Editor {
         }
     }
 
-    /// Opens the save-as prompt, which takes over the message bar's row.
-    fn open_command_bar(&mut self) {
-        self.command_bar = Some(CommandBar::new(Terminal::size().unwrap_or_default()));
+    /// Opens a prompt on the command bar's row, which takes over the
+    /// message bar's row while it is open.
+    fn open_prompt(&mut self, purpose: PromptPurpose) {
+        self.prompt = Some(PromptSession::open(&self.view, purpose));
     }
 
-    /// Routes a command to the active command bar and reacts to the
-    /// outcome: a confirmed prompt saves the buffer to the typed name, an
-    /// aborted one reports on the message bar.
-    fn handle_command_bar_command(&mut self, command: EditorCommand) {
-        // The viewport resizes together with the prompt.
-        if let EditorCommand::Resize(size) = command {
-            self.view.resize(size);
-        }
-
-        let outcome = self
-            .command_bar
-            .as_mut()
-            .expect("the command bar is open")
-            .handle_command(command);
-
-        match outcome {
-            CommandBarOutcome::Stay => {}
-            CommandBarOutcome::Save(file_name) => {
-                self.command_bar = None;
-                self.view.save_as(&file_name);
-            }
-            CommandBarOutcome::Abort => {
-                self.command_bar = None;
-                self.view
-                    .set_message(String::from("Save aborted"), LONG_MESSAGE_DURATION);
-            }
+    /// Routes a command to the active prompt and applies the outcome of a
+    /// closed prompt to the view.
+    fn handle_prompt_command(&mut self, command: EditorCommand) {
+        let mut session = self.prompt.take().expect("the prompt is open");
+        if let Some(resolution) = session.handle(&mut self.view, command) {
+            session.resolve(&mut self.view, resolution);
+            // The prompt closed, so `self.prompt` stays `None`.
+        } else {
+            self.prompt = Some(session);
         }
     }
 
     fn refresh_screen(&mut self) {
         let _ = Terminal::hide_cursor();
         self.view.render();
-        // While the command bar is active it replaces the message bar, so
-        // it draws after the view (which may still redraw the message bar)
+        // While a prompt is active it replaces the message bar, so it
+        // draws after the view (which may still redraw the message bar)
         // and it owns the terminal cursor.
-        let caret_position = match &mut self.command_bar {
-            Some(bar) => {
-                bar.render();
-                bar.get_caret_position()
-            }
+        let caret_position = match &mut self.prompt {
+            Some(session) => session.render(),
             None => self.view.get_caret_position(),
         };
         let _ = Terminal::move_cursor_to_pos(&caret_position);
@@ -206,8 +185,8 @@ impl Drop for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::constants::LONG_MESSAGE_DURATION;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::time::Duration;
 
     #[test]
     fn unrecognized_command_is_reported_on_the_message_bar() {
@@ -218,10 +197,7 @@ mod tests {
 
         let message = editor.view.get_message();
         assert_eq!(message.message, "Key Code not supported: F(1)");
-        assert_eq!(
-            message.duration,
-            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
-        );
+        assert_eq!(message.duration, DEFAULT_MESSAGE_DURATION);
     }
 
     fn ctrl_q() -> Event {
@@ -299,7 +275,7 @@ mod tests {
 
         editor.evaluate_event(ctrl_s());
 
-        assert!(editor.command_bar.is_some());
+        assert!(editor.prompt.is_some());
         // Opening the prompt must not touch the buffer or the message bar.
         assert_eq!(editor.view.get_status().total_lines, 0);
         assert_eq!(editor.view.get_message(), message_before);
@@ -314,7 +290,7 @@ mod tests {
 
         editor.evaluate_event(ctrl_s());
 
-        assert!(editor.command_bar.is_none());
+        assert!(editor.prompt.is_none());
         assert_eq!(
             editor.view.get_message().message,
             format!("File saved successfully to {path}")
@@ -332,9 +308,10 @@ mod tests {
 
         assert_eq!(
             editor
-                .command_bar
+                .prompt
                 .as_ref()
-                .expect("the command bar is open")
+                .expect("the prompt is open")
+                .bar()
                 .get_text(),
             "x"
         );
@@ -353,7 +330,7 @@ mod tests {
         }
         editor.evaluate_event(press(KeyCode::Enter));
 
-        assert!(editor.command_bar.is_none());
+        assert!(editor.prompt.is_none());
         assert_eq!(
             editor.view.get_message().message,
             format!("File saved successfully to {path}")
@@ -372,7 +349,7 @@ mod tests {
         editor.evaluate_event(ctrl_s());
         editor.evaluate_event(press(KeyCode::Enter));
 
-        assert!(editor.command_bar.is_some());
+        assert!(editor.prompt.is_some());
         assert_eq!(editor.view.get_message(), message_before);
     }
 
@@ -383,10 +360,10 @@ mod tests {
         editor.evaluate_event(ctrl_s());
         editor.evaluate_event(press(KeyCode::Esc));
 
-        assert!(editor.command_bar.is_none());
+        assert!(editor.prompt.is_none());
         let message = editor.view.get_message();
         assert_eq!(message.message, "Save aborted");
-        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+        assert_eq!(message.duration, LONG_MESSAGE_DURATION);
     }
 
     #[test]
@@ -397,7 +374,7 @@ mod tests {
         editor.evaluate_event(ctrl_s());
         editor.evaluate_event(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
 
-        assert!(editor.command_bar.is_some());
+        assert!(editor.prompt.is_some());
         assert_eq!(editor.view.get_message(), message_before);
     }
 
@@ -410,22 +387,24 @@ mod tests {
 
         // The prompt is dismissed (and the buffer left untouched) but the
         // editor itself must not quit on the first Ctrl-Q.
-        assert!(editor.command_bar.is_none());
+        assert!(editor.prompt.is_none());
         assert!(!editor.should_quit);
         assert_eq!(editor.view.get_message().message, "Save aborted");
     }
 
     #[test]
-    fn resize_while_the_command_bar_is_open_reaches_the_command_bar() {
+    fn resize_while_the_prompt_is_open_reaches_the_command_bar() {
         let mut editor = Editor::default();
 
         editor.evaluate_event(ctrl_s());
         editor.evaluate_event(Event::Resize(100, 30));
 
         let bar = editor
-            .command_bar
+            .prompt
             .as_ref()
-            .expect("the command bar is open");
-        assert_eq!(bar.get_caret_position().row, 29);
+            .expect("the prompt is open")
+            .bar()
+            .get_caret_position();
+        assert_eq!(bar.row, 29);
     }
 }

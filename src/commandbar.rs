@@ -1,67 +1,73 @@
-use crate::common::constants::RESERVED_BOTTOM_LINES;
+use crate::common::display::fit_to_width;
+use crate::common::layout::{BarLayout, MESSAGE_BAR_OFFSET};
 use crate::common::line::Line;
 use crate::editorcommand::{Direction, EditorCommand};
 use crate::terminal::{Position, Size, Terminal};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-/// The prompt drawn in front of the text the user enters.
-const SAVE_AS_PROMPT: &str = "Save as: ";
-/// Shown in place of the elided beginning of a file name that is longer
-/// than the bar.
+/// Shown in place of the elided beginning of text that is longer than the bar.
 const ELLIPSIS: char = '…';
 
-/// The outcome of handling a command with an open command bar: the prompt
-/// either stays open or it is confirmed with a file name / aborted.
+/// The outcome of handling a command with an open prompt: the prompt
+/// either stays open, is confirmed with the entered text, or is dismissed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandBarOutcome {
     /// The prompt stays open and nothing else needs to happen.
     Stay,
-    /// The user confirmed the prompt with the given file name.
-    Save(String),
-    /// The user dismissed the prompt without saving.
-    Abort,
+    /// The user confirmed the prompt (Enter) with the entered text.
+    Confirmed(String),
+    /// The user dismissed the prompt (Esc or quit) without confirming.
+    Cancelled,
 }
 
-/// Renders a "Save as:" prompt on the row the message bar occupies and
-/// collects the file name the user types. While it is active it replaces
-/// the message bar: the editor renders it after the view, places the
-/// terminal cursor using [`CommandBar::get_caret_position`] and reads the
-/// entered name with [`CommandBar::get_text`].
+/// A single-line input prompt rendered on a reserved row at the bottom of
+/// the terminal: the prompt text, the text the user is entering, and the
+/// caret.
+///
+/// The bar is prompt-agnostic — the prompt text is given to
+/// [`CommandBar::new`] — so the same bar can collect a file name, a
+/// search pattern, or any other single-line input. While it is active it
+/// is modal: [`CommandBar::handle_command`] interprets every command
+/// instead of letting it reach the view.
 pub struct CommandBar {
+    /// The prompt drawn in front of the text the user enters.
+    prompt: String,
     line: Line,
     /// The grapheme index of the caret within `line`.
     caret: usize,
-    width: usize,
-    row: usize,
+    layout: BarLayout,
 }
 
 impl CommandBar {
-    pub fn new(size: Size) -> Self {
+    /// Creates a prompt on the row the message bar occupies, so the two
+    /// bars never share the screen at the same time.
+    pub fn new(size: Size, prompt: impl Into<String>) -> Self {
         Self {
+            prompt: prompt.into(),
             line: Line::newline(),
             caret: 0,
-            width: size.width,
-            row: Self::bar_row(size),
+            layout: BarLayout::new(size, MESSAGE_BAR_OFFSET),
         }
     }
 
-    /// The row the bar renders on: the same row the message bar uses, so
-    /// the two bars never share the screen at the same time.
-    fn bar_row(terminal: Size) -> usize {
-        terminal
-            .height
-            .saturating_sub(RESERVED_BOTTOM_LINES)
-            .saturating_add(1)
+    /// Pre-fills the prompt with `text`, with the caret at the end of it.
+    pub fn with_initial_text(mut self, text: &str) -> Self {
+        self.line = Line::from(text);
+        self.caret = self.line.grapheme_count();
+        self
     }
 
     pub fn resize(&mut self, size: Size) {
-        self.width = size.width;
-        self.row = Self::bar_row(size);
+        self.layout.resize(size);
     }
 
     /// Handles an editor command while the prompt is open and reports the
-    /// outcome the editor must act on. Every command is interpreted by the
+    /// outcome the caller must act on. Every command is interpreted by the
     /// prompt instead of reaching the view, so the prompt is modal.
+    ///
+    /// Only Enter confirms the prompt; any other command keeps it open or
+    /// dismisses it (Esc and quit). A confirm with no text typed yet is
+    /// ignored, so the prompt stays open.
     pub fn handle_command(&mut self, command: EditorCommand) -> CommandBarOutcome {
         match command {
             EditorCommand::Insert(c) => {
@@ -80,17 +86,19 @@ impl CommandBar {
                 self.delete();
                 CommandBarOutcome::Stay
             }
-            // Enter and Save both confirm the prompt with the typed name.
-            EditorCommand::Enter | EditorCommand::Save => {
+            // Enter confirms the prompt with the typed text.
+            EditorCommand::Enter => {
                 if self.is_empty() {
-                    // No file name typed yet: the prompt stays open.
                     CommandBarOutcome::Stay
                 } else {
-                    CommandBarOutcome::Save(self.get_text())
+                    CommandBarOutcome::Confirmed(self.get_text())
                 }
             }
-            // Esc and Quit both dismiss the prompt without saving.
-            EditorCommand::Escape | EditorCommand::Quit => CommandBarOutcome::Abort,
+            // Esc and Quit both dismiss the prompt without confirming.
+            EditorCommand::Escape | EditorCommand::Quit => CommandBarOutcome::Cancelled,
+            // Save is meaningless to the prompt itself: the caller decides
+            // whether it acts on the open prompt.
+            EditorCommand::Save => CommandBarOutcome::Stay,
             EditorCommand::Resize(size) => {
                 self.resize(size);
                 CommandBarOutcome::Stay
@@ -149,31 +157,31 @@ impl CommandBar {
     /// buffer.
     pub fn get_caret_position(&self) -> Position {
         let (visible_from, elided) = self.visible_range();
+        let prompt_width = self.prompt.width();
         let col = if !elided {
-            SAVE_AS_PROMPT
-                .len()
-                .saturating_add(self.line.width_until(self.caret))
+            prompt_width.saturating_add(self.line.width_until(self.caret))
         } else if self.caret < visible_from {
             // The caret sits in the elided prefix: park it just behind the
             // ellipsis.
-            SAVE_AS_PROMPT.len().saturating_add(1)
+            prompt_width.saturating_add(1)
         } else {
-            SAVE_AS_PROMPT.len().saturating_add(1).saturating_add(
+            prompt_width.saturating_add(1).saturating_add(
                 self.line
                     .width_until(self.caret)
                     .saturating_sub(self.line.width_until(visible_from)),
             )
         };
         Position {
-            col: col.min(self.width.saturating_sub(1)),
-            row: self.row,
+            col: col.min(self.layout.width().saturating_sub(1)),
+            row: self.layout.row(),
         }
     }
 
     pub fn render(&mut self) {
+        let row = self.layout.row();
         let text = self.as_line();
-        let _ = Terminal::clear_row(self.row);
-        let result = Terminal::print_row(self.row, &text);
+        let _ = Terminal::clear_row(row);
+        let result = Terminal::print_row(row, &text);
         debug_assert!(result.is_ok(), "Failed to render command bar");
     }
 
@@ -181,12 +189,12 @@ impl CommandBar {
     /// text does not fit, and as much of the text's tail as the bar holds.
     fn as_line(&self) -> String {
         let (visible_from, elided) = self.visible_range();
-        let mut text = SAVE_AS_PROMPT.to_string();
+        let mut text = self.prompt.clone();
         if elided {
             text.push(ELLIPSIS);
         }
         text.push_str(&self.line.display_text_from(visible_from));
-        Self::fit_to_width(text, self.width)
+        fit_to_width(&text, self.layout.width())
     }
 
     /// The first grapheme index still visible in the bar, and whether the
@@ -198,7 +206,7 @@ impl CommandBar {
     fn visible_range(&self) -> (usize, bool) {
         let count = self.line.grapheme_count();
         let total = self.line.width_until(count);
-        let available = self.width.saturating_sub(SAVE_AS_PROMPT.len());
+        let available = self.layout.width().saturating_sub(self.prompt.width());
         if count == 0 || total <= available {
             return (0, false);
         }
@@ -216,39 +224,17 @@ impl CommandBar {
         }
         (index, true)
     }
-
-    /// Truncates `text` to at most `width` display columns, never cutting a
-    /// character in half.
-    fn fit_to_width(text: String, width: usize) -> String {
-        if text.width() <= width {
-            return text;
-        }
-        let mut truncated = String::new();
-        let mut columns: usize = 0;
-        for ch in text.chars() {
-            let char_width = ch.width().unwrap_or(0);
-            if columns.saturating_add(char_width) > width {
-                break;
-            }
-            columns = columns.saturating_add(char_width);
-            truncated.push(ch);
-        }
-        truncated
-    }
-}
-
-impl Default for CommandBar {
-    fn default() -> Self {
-        Self::new(Terminal::size().unwrap_or_default())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The prompt every test prompt is opened with.
+    const PROMPT: &str = "Save as: ";
+
     fn bar(width: usize) -> CommandBar {
-        CommandBar::new(Size { width, height: 24 })
+        CommandBar::new(Size { width, height: 24 }, PROMPT)
     }
 
     fn bar_with_text(text: &str, width: usize) -> CommandBar {
@@ -264,7 +250,7 @@ mod tests {
         let bar = bar(80);
         assert!(bar.is_empty());
         assert_eq!(bar.get_text(), "");
-        assert_eq!(bar.row, 23);
+        assert_eq!(bar.layout.row(), 23);
     }
 
     #[test]
@@ -273,7 +259,20 @@ mod tests {
         assert_eq!(
             bar.get_caret_position(),
             Position {
-                col: SAVE_AS_PROMPT.len(),
+                col: PROMPT.len(),
+                row: 23,
+            }
+        );
+    }
+
+    #[test]
+    fn with_initial_text_prefills_the_bar_and_parks_the_caret_at_the_end() {
+        let bar = bar(80).with_initial_text("file.txt");
+        assert_eq!(bar.get_text(), "file.txt");
+        assert_eq!(
+            bar.get_caret_position(),
+            Position {
+                col: PROMPT.len() + 8,
                 row: 23,
             }
         );
@@ -285,7 +284,7 @@ mod tests {
         bar.insert_char('a');
         bar.insert_char('b');
         assert_eq!(bar.get_text(), "ab");
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len() + 2);
+        assert_eq!(bar.get_caret_position().col, PROMPT.len() + 2);
     }
 
     #[test]
@@ -296,7 +295,7 @@ mod tests {
         bar.insert_char('b');
         assert_eq!(bar.get_text(), "abc");
         // The caret moved one grapheme right, behind the inserted 'b'.
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len() + 2);
+        assert_eq!(bar.get_caret_position().col, PROMPT.len() + 2);
     }
 
     #[test]
@@ -304,7 +303,7 @@ mod tests {
         let mut bar = bar_with_text("abc", 80);
         bar.backspace();
         assert_eq!(bar.get_text(), "ab");
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len() + 2);
+        assert_eq!(bar.get_caret_position().col, PROMPT.len() + 2);
     }
 
     #[test]
@@ -322,7 +321,7 @@ mod tests {
         bar.delete();
         assert_eq!(bar.get_text(), "bc");
         // The caret stays put.
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len());
+        assert_eq!(bar.get_caret_position().col, PROMPT.len());
     }
 
     #[test]
@@ -335,7 +334,7 @@ mod tests {
     #[test]
     fn move_caret_walks_the_text_horizontally() {
         let mut bar = bar_with_text("abcd", 80);
-        let base = SAVE_AS_PROMPT.len();
+        let base = PROMPT.len();
         bar.move_caret(Direction::Home);
         assert_eq!(bar.get_caret_position().col, base);
         bar.move_caret(Direction::Right);
@@ -353,10 +352,10 @@ mod tests {
         let mut bar = bar_with_text("ab", 80);
         bar.move_caret(Direction::Home);
         bar.move_caret(Direction::Left);
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len());
+        assert_eq!(bar.get_caret_position().col, PROMPT.len());
         bar.move_caret(Direction::End);
         bar.move_caret(Direction::Right);
-        assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len() + 2);
+        assert_eq!(bar.get_caret_position().col, PROMPT.len() + 2);
     }
 
     #[test]
@@ -371,7 +370,7 @@ mod tests {
             Direction::PageDown,
         ] {
             bar.move_caret(direction);
-            assert_eq!(bar.get_caret_position().col, SAVE_AS_PROMPT.len() + 2);
+            assert_eq!(bar.get_caret_position().col, PROMPT.len() + 2);
         }
     }
 
@@ -382,7 +381,7 @@ mod tests {
         bar.insert_char('a');
         assert_eq!(
             bar.get_caret_position().col,
-            SAVE_AS_PROMPT.len() + crate::common::constants::TAB_WIDTH_SPACES + 1
+            PROMPT.len() + crate::common::constants::TAB_WIDTH_SPACES + 1
         );
     }
 
@@ -453,7 +452,7 @@ mod tests {
         assert_eq!(
             bar.get_caret_position(),
             Position {
-                col: SAVE_AS_PROMPT.len() + 4,
+                col: PROMPT.len() + 4,
                 row: 23,
             }
         );
@@ -466,7 +465,7 @@ mod tests {
         assert_eq!(
             bar.get_caret_position(),
             Position {
-                col: SAVE_AS_PROMPT.len() + 1,
+                col: PROMPT.len() + 1,
                 row: 23,
             }
         );
@@ -493,17 +492,20 @@ mod tests {
             width: 100,
             height: 30,
         });
-        assert_eq!(bar.row, 29);
+        assert_eq!(bar.layout.row(), 29);
         assert_eq!(bar.get_caret_position().row, 29);
     }
 
     #[test]
     fn bar_row_saturates_when_the_terminal_is_too_short() {
-        let bar = CommandBar::new(Size {
-            width: 80,
-            height: 0,
-        });
-        assert_eq!(bar.row, 1);
+        let bar = CommandBar::new(
+            Size {
+                width: 80,
+                height: 0,
+            },
+            PROMPT,
+        );
+        assert_eq!(bar.layout.row(), 1);
     }
 
     #[test]
@@ -522,7 +524,10 @@ mod tests {
 
         let outcome = bar.handle_command(EditorCommand::Enter);
 
-        assert_eq!(outcome, CommandBarOutcome::Save(String::from("file.txt")));
+        assert_eq!(
+            outcome,
+            CommandBarOutcome::Confirmed(String::from("file.txt"))
+        );
     }
 
     #[test]
@@ -535,12 +540,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_command_escape_aborts_the_prompt() {
+    fn handle_command_escape_dismisses_the_prompt() {
         let mut bar = bar_with_text("file.txt", 80);
 
         let outcome = bar.handle_command(EditorCommand::Escape);
 
-        assert_eq!(outcome, CommandBarOutcome::Abort);
+        assert_eq!(outcome, CommandBarOutcome::Cancelled);
     }
 
     #[test]
@@ -557,30 +562,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_command_quit_aborts_the_prompt() {
+    fn handle_command_quit_dismisses_the_prompt() {
         let mut bar = bar_with_text("file.txt", 80);
 
         assert_eq!(
             bar.handle_command(EditorCommand::Quit),
-            CommandBarOutcome::Abort
+            CommandBarOutcome::Cancelled
         );
     }
 
     #[test]
-    fn handle_command_save_confirms_like_enter() {
+    fn handle_command_save_leaves_the_prompt_open() {
+        // Only Enter confirms a prompt: Save is meaningless to the bar
+        // itself, and the caller decides whether to act on it.
         let mut bar = bar_with_text("file.txt", 80);
 
         let outcome = bar.handle_command(EditorCommand::Save);
 
-        assert_eq!(outcome, CommandBarOutcome::Save(String::from("file.txt")));
-    }
-
-    #[test]
-    fn handle_command_save_without_text_keeps_the_prompt_open() {
-        let mut bar = bar(80);
-
-        let outcome = bar.handle_command(EditorCommand::Save);
-
         assert_eq!(outcome, CommandBarOutcome::Stay);
+        assert_eq!(bar.get_text(), "file.txt");
     }
 }

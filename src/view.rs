@@ -9,6 +9,7 @@ use crate::messagebar::{MessageBar, MessageState};
 use crate::statusbar::{DocumentStatus, StatusBar};
 use crate::terminal::{Position, Size, Terminal};
 use std::cmp::min;
+use std::time::Duration;
 
 /// Shown on the message bar until a more specific message replaces it.
 const DEFAULT_MESSAGE: &str = "HELP: C-s = Save | C-q = quit";
@@ -22,20 +23,15 @@ pub struct View {
     desired_x: usize,
     status_bar: StatusBar,
     message_bar: MessageBar,
-    message: MessageState,
     /// Set when a quit request was refused because of unsaved changes; a
     /// second consecutive Ctrl-Q then confirms the quit.
     quit_pending: bool,
 }
 
-impl Default for View {
-    fn default() -> Self {
-        Self::new(Terminal::size().unwrap_or_default())
-    }
-}
-
 impl View {
     pub fn new(size: Size) -> Self {
+        let mut message_bar = MessageBar::new(size);
+        message_bar.set_message(String::from(DEFAULT_MESSAGE), DEFAULT_MESSAGE_DURATION);
         View {
             buffer: Buffer::default(),
             modified: true,
@@ -44,8 +40,7 @@ impl View {
             scroll_offset: Position::default(),
             desired_x: 0,
             status_bar: StatusBar::new(size),
-            message_bar: MessageBar::new(size),
-            message: MessageState::create_default_duration(String::from(DEFAULT_MESSAGE)),
+            message_bar,
             quit_pending: false,
         }
     }
@@ -74,17 +69,29 @@ impl View {
         self.buffer.file_name.is_some()
     }
 
-    /// The view's current message, stored so its display timer survives
-    /// across renders. Returning a clone (not a fresh state) is what keeps
-    /// the message from being re-armed on every render pass.
+    /// The view's current message, read from the message bar that owns
+    /// it (state and display timer). Returning a clone is what keeps the
+    /// message from being re-armed on every render pass.
+    // Only the test suite reads the message so far; the editor reports
+    // messages without inspecting the previous one.
+    #[allow(dead_code)]
     pub fn get_message(&self) -> MessageState {
-        self.message.clone()
+        self.message_bar.message().clone()
     }
 
     /// Replaces the message shown on the message bar and (re)starts its
-    /// display timer, so it stays visible for `duration_sec` seconds.
-    pub fn set_message(&mut self, message: String, duration_sec: u64) {
-        self.message = MessageState::create_message(message, duration_sec);
+    /// display timer, so it stays visible for `duration`.
+    pub fn set_message(&mut self, message: String, duration: Duration) {
+        self.message_bar.set_message(message, duration);
+    }
+
+    /// The full terminal size: the viewport plus the rows reserved for
+    /// the bars at the bottom.
+    pub fn terminal_size(&self) -> Size {
+        Size {
+            width: self.size.width,
+            height: self.size.height.saturating_add(RESERVED_BOTTOM_LINES),
+        }
     }
 
     pub fn resize(&mut self, to: Size) {
@@ -218,13 +225,7 @@ impl View {
         }
 
         if terminal_height >= 1 {
-            // Drop messages that have outlived their duration before pushing
-            // them, so the bar can't re-animate a message it already cleared.
-            if self.message.created_at.elapsed() >= self.message.duration {
-                self.message = MessageState::default();
-            }
-
-            self.message_bar.update(self.get_message());
+            // The bar owns its message and drops it once it has expired.
             self.message_bar.render();
         }
     }
@@ -508,21 +509,20 @@ mod tests {
             desired_x: 0,
             status_bar: StatusBar::new(terminal_size),
             message_bar: MessageBar::new(terminal_size),
-            message: MessageState::default(),
         }
     }
 
     #[test]
     fn get_message_returns_a_stable_state_across_calls() {
         let mut view = make_view(&[]);
-        view.set_message(String::from("hi"), 5);
+        view.set_message(String::from("hi"), Duration::from_secs(5));
         assert_eq!(view.get_message(), view.get_message());
     }
 
     #[test]
     fn set_message_stores_message_and_duration() {
         let mut view = make_view(&[]);
-        view.set_message(String::from("Saved!"), 5);
+        view.set_message(String::from("Saved!"), Duration::from_secs(5));
         let message = view.get_message();
         assert_eq!(message.message, "Saved!");
         assert_eq!(message.duration, Duration::from_secs(5));
@@ -545,10 +545,7 @@ mod tests {
             message.message,
             format!("File saved successfully to {file_path}")
         );
-        assert_eq!(
-            message.duration,
-            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
-        );
+        assert_eq!(message.duration, DEFAULT_MESSAGE_DURATION);
         assert!(!view.buffer.modified);
 
         let _ = std::fs::remove_file(&path);
@@ -562,7 +559,7 @@ mod tests {
 
         let message = view.get_message();
         assert_eq!(message.message, "Error writing file!");
-        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+        assert_eq!(message.duration, LONG_MESSAGE_DURATION);
         assert!(view.buffer.modified);
     }
 
@@ -580,10 +577,7 @@ mod tests {
             message.message,
             format!("File saved successfully to {file_path}")
         );
-        assert_eq!(
-            message.duration,
-            Duration::from_secs(DEFAULT_MESSAGE_DURATION)
-        );
+        assert_eq!(message.duration, DEFAULT_MESSAGE_DURATION);
         assert_eq!(view.buffer.file_name.as_deref(), Some(file_path.as_str()));
         assert!(!view.buffer.modified);
         assert!(path.exists());
@@ -638,7 +632,7 @@ mod tests {
             message.message,
             format!("Error: Could not open file: {file_path}")
         );
-        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+        assert_eq!(message.duration, LONG_MESSAGE_DURATION);
         // The buffer falls back to empty, unsaved state.
         assert!(view.buffer.is_empty());
         assert!(view.buffer.file_name.is_none());
@@ -685,7 +679,7 @@ mod tests {
             message.message,
             "WARNING! File file.txt has unsaved changes. Press Ctrl-Q again to quit without saving"
         );
-        assert_eq!(message.duration, Duration::from_secs(LONG_MESSAGE_DURATION));
+        assert_eq!(message.duration, LONG_MESSAGE_DURATION);
     }
 
     #[test]
