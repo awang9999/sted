@@ -96,9 +96,9 @@ impl CommandBar {
             }
             // Esc and Quit both dismiss the prompt without confirming.
             EditorCommand::Escape | EditorCommand::Quit => CommandBarOutcome::Cancelled,
-            // Save is meaningless to the prompt itself: the caller decides
-            // whether it acts on the open prompt.
-            EditorCommand::Save => CommandBarOutcome::Stay,
+            // Save and Find are meaningless to the prompt itself: the
+            // caller decides whether it acts on the open prompt.
+            EditorCommand::Save | EditorCommand::Find => CommandBarOutcome::Stay,
             EditorCommand::Resize(size) => {
                 self.resize(size);
                 CommandBarOutcome::Stay
@@ -578,6 +578,18 @@ mod tests {
         let mut bar = bar_with_text("file.txt", 80);
 
         let outcome = bar.handle_command(EditorCommand::Save);
+
+        assert_eq!(outcome, CommandBarOutcome::Stay);
+        assert_eq!(bar.get_text(), "file.txt");
+    }
+
+    #[test]
+    fn handle_command_find_leaves_the_prompt_open() {
+        // Like Save, Find is meaningless to the bar itself: the caller
+        // decides whether to act on the open prompt.
+        let mut bar = bar_with_text("file.txt", 80);
+
+        let outcome = bar.handle_command(EditorCommand::Find);
 
         assert_eq!(outcome, CommandBarOutcome::Stay);
         assert_eq!(bar.get_text(), "file.txt");

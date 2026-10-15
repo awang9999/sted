@@ -25,6 +25,7 @@ pub enum EditorCommand {
     BackSpace,
     Quit,
     Save,
+    Find,
     Escape,
 }
 
@@ -39,6 +40,7 @@ impl TryFrom<Event> for EditorCommand {
                 // Program control
                 (KeyCode::Char('q'), KeyModifiers::CONTROL) => Ok(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Ok(Self::Save),
+                (KeyCode::Char('f'), KeyModifiers::CONTROL) => Ok(Self::Find),
                 (KeyCode::Esc, KeyModifiers::NONE) => Ok(Self::Escape),
                 // Caret movement
                 (KeyCode::Up, KeyModifiers::NONE) => Ok(Self::Move(Direction::Up)),
@@ -113,6 +115,13 @@ mod tests {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         let command = EditorCommand::try_from(event).expect("Ctrl-S should be supported");
         assert!(matches!(command, EditorCommand::Save));
+    }
+
+    #[test]
+    fn ctrl_f_maps_to_find() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let command = EditorCommand::try_from(event).expect("Ctrl-F should be supported");
+        assert!(matches!(command, EditorCommand::Find));
     }
 
     #[test]

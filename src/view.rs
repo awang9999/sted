@@ -12,7 +12,7 @@ use std::cmp::min;
 use std::time::Duration;
 
 /// Shown on the message bar until a more specific message replaces it.
-const DEFAULT_MESSAGE: &str = "HELP: C-s = Save | C-q = quit";
+const DEFAULT_MESSAGE: &str = "HELP: Ctrl-F = find | Ctrl-S = save | Ctrl-Q = quit";
 
 pub struct View {
     buffer: Buffer,
@@ -143,9 +143,9 @@ impl View {
             EditorCommand::Delete => self.handle_delete(),
             EditorCommand::BackSpace => self.handle_backspace(),
             EditorCommand::Save => self.handle_save(),
-            // Quit is handled by the editor. Escape is only meaningful to
-            // the command bar; the view ignores both.
-            EditorCommand::Quit | EditorCommand::Escape => (),
+            // Quit and Find are handled by the editor. Escape is only
+            // meaningful to the command bar. The view ignores all three.
+            EditorCommand::Quit | EditorCommand::Find | EditorCommand::Escape => (),
         }
     }
 
@@ -510,6 +510,20 @@ mod tests {
             status_bar: StatusBar::new(terminal_size),
             message_bar: MessageBar::new(terminal_size),
         }
+    }
+
+    #[test]
+    fn new_view_shows_the_help_message_on_the_message_bar() {
+        let view = View::new(Size {
+            width: 80,
+            height: 24,
+        });
+        let message = view.get_message();
+        assert_eq!(
+            message.message,
+            "HELP: Ctrl-F = find | Ctrl-S = save | Ctrl-Q = quit"
+        );
+        assert_eq!(message.duration, DEFAULT_MESSAGE_DURATION);
     }
 
     #[test]

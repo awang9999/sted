@@ -129,6 +129,11 @@ impl Editor {
                         self.open_prompt(PromptPurpose::SaveAs);
                     }
                 }
+                EditorCommand::Find => {
+                    // Collect the pattern to search for on the command bar;
+                    // searching itself is not implemented yet.
+                    self.open_prompt(PromptPurpose::Find);
+                }
                 _ => self.view.handle_command(command),
             }
         } else {
@@ -206,6 +211,10 @@ mod tests {
 
     fn ctrl_s() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+    }
+
+    fn ctrl_f() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
     }
 
     fn key(c: char) -> Event {
@@ -390,6 +399,57 @@ mod tests {
         assert!(editor.prompt.is_none());
         assert!(!editor.should_quit);
         assert_eq!(editor.view.get_message().message, "Save aborted");
+    }
+
+    #[test]
+    fn find_opens_the_search_prompt() {
+        let mut editor = Editor::default();
+        let message_before = editor.view.get_message();
+
+        editor.evaluate_event(ctrl_f());
+
+        assert!(editor.prompt.is_some());
+        // Opening the prompt must not touch the buffer or the message bar.
+        assert_eq!(editor.view.get_status().total_lines, 0);
+        assert_eq!(editor.view.get_message(), message_before);
+    }
+
+    #[test]
+    fn enter_on_the_search_prompt_does_nothing_yet() {
+        let mut editor = Editor::default();
+        let message_before = editor.view.get_message();
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('a'));
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        // Search is not implemented yet: the prompt stays open with its
+        // text, and the buffer and message bar are untouched.
+        assert!(editor.prompt.is_some());
+        assert_eq!(
+            editor
+                .prompt
+                .as_ref()
+                .expect("the prompt is open")
+                .bar()
+                .get_text(),
+            "a"
+        );
+        assert_eq!(editor.view.get_status().total_lines, 0);
+        assert_eq!(editor.view.get_message(), message_before);
+    }
+
+    #[test]
+    fn escape_on_the_search_prompt_reports_search_aborted() {
+        let mut editor = Editor::default();
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(press(KeyCode::Esc));
+
+        assert!(editor.prompt.is_none());
+        let message = editor.view.get_message();
+        assert_eq!(message.message, "Search aborted");
+        assert_eq!(message.duration, LONG_MESSAGE_DURATION);
     }
 
     #[test]
