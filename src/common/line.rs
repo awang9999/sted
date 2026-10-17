@@ -7,54 +7,169 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// A single line of a buffer.
+///
+/// The line's text is stored verbatim in `text` and is the single source
+/// of truth: edit operations modify it in place at the byte positions the
+/// fragments remember, and a search can work on it directly without
+/// assembling it. `fragments` is layout information derived from `text` —
+/// one entry per grapheme cluster, each carrying its byte index in `text`
+/// (as reported by `grapheme_indices`) so grapheme indices can be
+/// translated into byte positions without scanning the line.
 #[derive(Clone)]
 pub struct Line {
-    content: Vec<TextFragment>,
+    /// The raw text of the line, kept verbatim.
+    text: String,
+    /// Layout information derived from `text`: one fragment per grapheme
+    /// cluster.
+    fragments: Vec<TextFragment>,
     pub scroll_x: usize,
 }
 
-/// Renders the line's raw text content (the actual graphemes), not the
-/// on-screen representation. This is the round-trippable form used when
-/// re-parsing a line's content; use [`Line::get`] for what is drawn.
+/// Writes the line's raw text (the actual graphemes), not the on-screen
+/// representation; use [`Line::get`] for what is drawn.
 impl fmt::Display for Line {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for fragment in &self.content {
-            f.write_str(&fragment.grapheme)?;
-        }
-        Ok(())
+        f.write_str(&self.text)
     }
 }
 
 impl Line {
     pub fn newline() -> Self {
+        Self::from("")
+    }
+
+    pub fn from(line_str: &str) -> Self {
         Self {
-            content: Self::convert_string_to_content(""),
+            text: line_str.to_string(),
+            fragments: Self::fragments_from(line_str),
             scroll_x: 0,
         }
     }
 
-    pub fn from(line_str: &str) -> Self {
-        let content = Self::convert_string_to_content(line_str);
+    /// The line's raw text, ready for byte-wise operations such as
+    /// `str::find`.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 
-        Self {
-            content,
-            scroll_x: 0,
+    /// The grapheme at `grapheme_index` as a slice of the line's text:
+    /// from its byte index to the next fragment's byte index, or to the end
+    /// of the text for the last grapheme.
+    fn grapheme_text(&self, grapheme_index: usize) -> &str {
+        let start = self.fragments[grapheme_index].byte_index;
+        let end = Self::grapheme_end(&self.fragments, grapheme_index, self.text.len());
+        &self.text[start..end]
+    }
+
+    /// The on-screen text of the grapheme at `grapheme_index`: the raw
+    /// grapheme, or its replacement for invisible graphemes such as tabs
+    /// and control characters.
+    fn display_text_of(&self, grapheme_index: usize) -> &str {
+        match &self.fragments[grapheme_index].replacement {
+            Some(replacement) => replacement.as_str(),
+            None => self.grapheme_text(grapheme_index),
         }
     }
 
     /// Appends the content of `other` to this line, keeping this line's existing content first.
-    pub fn append(&mut self, other: Self) {
-        self.content.extend(other.content);
-        // we need to convert the full line into a string and then back to vec<TextFragment>
-        // in case appending other to self modifies the edge graphemes
-        let content_string = self.to_string();
-        self.content = Line::convert_string_to_content(&content_string);
+    pub fn append(&mut self, other: &Self) {
+        if other.text.is_empty() {
+            return;
+        }
+        // Appending can join graphemes across the seam (a combining mark or
+        // a ZWJ sequence), so re-segment from this line's last grapheme.
+        let seam = self.fragments.len().saturating_sub(1);
+        self.text.push_str(&other.text);
+        self.resegment_from(seam);
     }
 
-    fn convert_string_to_content(line_str: &str) -> Vec<TextFragment> {
+    /// Splits this line at `grapheme_index`: the graphemes before the index
+    /// stay in place and a new `Line` containing the remainder is returned.
+    ///
+    /// The index is clamped to the line's length, so splitting an empty line
+    /// or splitting past the end of the line leaves this line intact and
+    /// yields an empty remainder.
+    pub fn split_at(&mut self, grapheme_index: usize) -> Line {
+        let index = grapheme_index.min(self.fragments.len());
+        let byte_index = self.byte_index_at(index);
+
+        // Cut the text at the grapheme boundary. A split never lands inside
+        // a grapheme, so the kept fragments stay valid and only the text
+        // changes; the remainder gets fresh fragments from its own text.
+        let text = std::mem::take(&mut self.text);
+        let (before, after) = text.split_at(byte_index);
+        self.text = before.to_string();
+        self.fragments.truncate(index);
+
+        Line::from(after)
+    }
+
+    /// Inserts character `c` at `grapheme_index`, shifting all subsequent graphemes right.
+    pub fn insert_char(&mut self, grapheme_index: usize, c: char) {
+        let index = grapheme_index.min(self.fragments.len());
+        let byte_index = self.byte_index_at(index);
+        self.text.insert(byte_index, c);
+        // The inserted character can join a neighbouring grapheme (a
+        // combining mark or a ZWJ sequence), so re-segment from the grapheme
+        // before the insertion point.
+        self.resegment_from(index.saturating_sub(1));
+    }
+
+    /// Removes the grapheme cluster at `grapheme_index` from this line's content.
+    pub fn delete_grapheme(&mut self, grapheme_index: usize) {
+        let start = match self.fragments.get(grapheme_index) {
+            Some(fragment) => fragment.byte_index,
+            None => return,
+        };
+        let end = Self::grapheme_end(&self.fragments, grapheme_index, self.text.len());
+        self.text.replace_range(start..end, "");
+        // Deleting a grapheme can join its neighbours (a combining mark or a
+        // ZWJ sequence), so re-segment from the grapheme before the deleted
+        // one.
+        self.resegment_from(grapheme_index.saturating_sub(1));
+    }
+
+    /// The byte index in the line's text where the grapheme at
+    /// `grapheme_index` begins; indices past the end of the line yield the
+    /// length of the text.
+    fn byte_index_at(&self, grapheme_index: usize) -> usize {
+        match self.fragments.get(grapheme_index) {
+            Some(fragment) => fragment.byte_index,
+            None => self.text.len(),
+        }
+    }
+
+    /// Rebuilds the fragments from fragment `start` onward, reusing the
+    /// untouched prefix. The line's text is the source of truth, so this
+    /// re-derives the grapheme clusters and their byte indices for the part
+    /// of the line an edit may have changed.
+    fn resegment_from(&mut self, start: usize) {
+        let start = start.min(self.fragments.len());
+        // The region starts where fragment `start` began; the untouched
+        // prefix keeps its fragments and their byte indices. When `start`
+        // is at the (old) end of the fragments, the whole new text is the
+        // region.
+        let prefix_len = self
+            .fragments
+            .get(start)
+            .map_or(0, |fragment| fragment.byte_index);
+        let region = &self.text[prefix_len..];
+        let mut suffix = Self::fragments_from(region);
+        for fragment in &mut suffix {
+            fragment.byte_index = fragment.byte_index.saturating_add(prefix_len);
+        }
+        self.fragments.truncate(start);
+        self.fragments.extend(suffix);
+    }
+
+    /// Segments `line_str` into fragments: one per grapheme cluster, each
+    /// remembering its byte index in `line_str`, its rendered width, and
+    /// the replacement text used for invisible graphemes.
+    fn fragments_from(line_str: &str) -> Vec<TextFragment> {
         let fragments = line_str
-            .graphemes(true)
-            .map(|grapheme| {
+            .grapheme_indices(true)
+            .map(|(byte_index, grapheme)| {
                 let unicode_width = grapheme.width();
                 // Tabs render as TAB_WIDTH_SPACES spaces, so they must be
                 // measured with that width instead of their Unicode width of 0.
@@ -66,40 +181,60 @@ impl Line {
                     },
                 };
 
-                let replacement = Line::replacement_character(grapheme);
-                TextFragment::from(grapheme, rendered_width, replacement)
+                let replacement = Self::replacement_character(grapheme);
+                TextFragment::from(byte_index, rendered_width, replacement)
             })
             .collect::<Vec<_>>();
 
-        // Merge fragments that form a compound emoji via U+200D.
-        let mut merged: Vec<TextFragment> = Vec::with_capacity(fragments.len());
-        let mut pending = fragments.iter().peekable();
-        while let Some(fragment) = pending.next() {
-            let mut current = fragment.clone();
-            while let Some(next) = pending.peek()
-                && (current.grapheme.ends_with('\u{200d}') || next.grapheme.starts_with('\u{200d}'))
-            {
-                let combined_str = format!("{}{}", current.grapheme, next.grapheme);
+        Self::merge_zwj_fragments(line_str, &fragments)
+    }
 
-                let width = UnicodeWidthStr::width(combined_str.as_str());
+    /// Merges fragments that form a compound emoji via U+200D. The merged
+    /// fragment keeps the first fragment's byte index and spans the merged
+    /// graphemes' byte range in `line_str`.
+    fn merge_zwj_fragments(line_str: &str, fragments: &[TextFragment]) -> Vec<TextFragment> {
+        let mut merged: Vec<TextFragment> = Vec::with_capacity(fragments.len());
+        let mut start = 0usize;
+        while start < fragments.len() {
+            let first = fragments[start].byte_index;
+            let mut stop = start;
+            let mut end = Self::grapheme_end(fragments, stop, line_str.len());
+            // Extend while the merged range and the next raw grapheme are
+            // joined via U+200D: the merged range ends in a ZWJ, or the
+            // next grapheme begins with one.
+            while stop.saturating_add(1) < fragments.len()
+                && (line_str[first..end].ends_with('\u{200d}')
+                    || line_str[end..].starts_with('\u{200d}'))
+            {
+                stop = stop.saturating_add(1);
+                end = Self::grapheme_end(fragments, stop, line_str.len());
+            }
+
+            if stop > start {
+                // Recompute width and replacement over the full merged range.
+                let range = &line_str[first..end];
+                let width = UnicodeWidthStr::width(range);
                 let rendered_width = if width > 1 {
                     GraphemeWidth::Full
                 } else {
                     GraphemeWidth::Half
                 };
-                let replacement = Line::replacement_character(&combined_str);
-
-                current.grapheme = combined_str;
-                current.rendered_width = rendered_width;
-                current.replacement = replacement;
-
-                // Consume the merged fragment.
-                pending.next();
+                let replacement = Self::replacement_character(range);
+                merged.push(TextFragment::from(first, rendered_width, replacement));
+            } else {
+                merged.push(fragments[start].clone());
             }
-            merged.push(current);
+            start = stop.saturating_add(1);
         }
-
         merged
+    }
+
+    /// The byte index just past the grapheme at `index`: the next
+    /// fragment's start, or the end of the line holding `line_len` bytes.
+    fn grapheme_end(fragments: &[TextFragment], index: usize, line_len: usize) -> usize {
+        fragments
+            .get(index.saturating_add(1))
+            .map_or(line_len, |fragment| fragment.byte_index)
     }
 
     // Given a view offset x and a terminal width, returns
@@ -107,7 +242,7 @@ impl Line {
     // of the visible range cuts off a grapheme, the character
     // U+2026 (…) replaces it.
     pub fn get(&self, range: Range<usize>) -> String {
-        if self.content.is_empty() {
+        if self.fragments.is_empty() {
             return String::new();
         }
 
@@ -115,7 +250,7 @@ impl Line {
         let mut idx = 0; // track index of grapheme vector
 
         // Skip past graphemes before the visible range
-        while idx < self.content.len() && self.width_until(idx) < range.start {
+        while idx < self.fragments.len() && self.width_until(idx) < range.start {
             idx = idx.saturating_add(1);
         }
 
@@ -126,13 +261,13 @@ impl Line {
         }
 
         // Add graphemes within the visible range
-        while idx < self.content.len() && self.width_until(idx.saturating_add(1)) <= range.end {
-            segment.push_str(self.content[idx].get_display_text());
+        while idx < self.fragments.len() && self.width_until(idx.saturating_add(1)) <= range.end {
+            segment.push_str(self.display_text_of(idx));
             idx = idx.saturating_add(1);
         }
 
         // Truncation at range.end?
-        if idx < self.content.len() && self.width_until(idx) > range.end {
+        if idx < self.fragments.len() && self.width_until(idx) > range.end {
             segment.push('…');
         }
 
@@ -140,22 +275,20 @@ impl Line {
     }
 
     pub fn grapheme_count(&self) -> usize {
-        self.content.len()
+        self.fragments.len()
     }
 
     /// The rendered form of the line's graphemes from `grapheme_index` to
     /// its end: tabs and control characters already replaced by their
     /// display text. Indices past the end of the line yield an empty string.
     pub fn display_text_from(&self, grapheme_index: usize) -> String {
-        self.content
-            .iter()
-            .skip(grapheme_index.min(self.content.len()))
-            .map(TextFragment::get_display_text)
+        (grapheme_index.min(self.fragments.len())..self.fragments.len())
+            .map(|index| self.display_text_of(index))
             .collect()
     }
 
     pub fn width_until(&self, grapheme_index: usize) -> usize {
-        self.content
+        self.fragments
             .iter()
             .take(grapheme_index)
             .map(|fragment| match fragment.rendered_width {
@@ -180,57 +313,15 @@ impl Line {
             _ => None,
         }
     }
-
-    /// Inserts character `c` at `grapheme_index`, shifting all subsequent graphemes right.
-    pub fn insert_char(&mut self, grapheme_index: usize, c: char) {
-        // Clamped insertion index: inserting past the end appends at EOF.
-        let index = grapheme_index.min(self.content.len());
-
-        // Build the new content from the graphemes before the insertion index,
-        // the inserted character, and the graphemes from the index onward.
-        let mut result: String = self
-            .content
-            .iter()
-            .take(index)
-            .map(|fragment| fragment.grapheme.as_str())
-            .collect();
-        result.push(c);
-        result.extend(
-            self.content
-                .iter()
-                .skip(index)
-                .map(|fragment| fragment.grapheme.as_str()),
-        );
-
-        self.content = Self::convert_string_to_content(&result);
-    }
-
-    /// Splits this line at `grapheme_index`: the graphemes before the index
-    /// stay in place and a new `Line` containing the remainder is returned.
-    ///
-    /// The index is clamped to the line's length, so splitting an empty line
-    /// or splitting past the end of the line leaves this line intact and
-    /// yields an empty remainder.
-    pub fn split_at(&mut self, grapheme_index: usize) -> Line {
-        let index = grapheme_index.min(self.content.len());
-        let remainder = self.content.split_off(index);
-        Self {
-            content: remainder,
-            scroll_x: 0,
-        }
-    }
-
-    /// Removes the grapheme cluster at `grapheme_index` from this line's content.
-    pub fn delete_grapheme(&mut self, grapheme_index: usize) {
-        if grapheme_index < self.content.len() {
-            self.content.remove(grapheme_index);
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn byte_indices(line: &Line) -> Vec<usize> {
+        line.fragments.iter().map(|f| f.byte_index).collect()
+    }
 
     #[test]
     fn delete_grapheme_removes_correct_grapheme() {
@@ -274,12 +365,12 @@ mod tests {
     fn delete_grapheme_empty_line_is_noop() {
         let mut line = Line::from("");
         line.delete_grapheme(0);
-        assert_eq!(line.content.len(), 0);
+        assert_eq!(line.grapheme_count(), 0);
     }
 
     #[test]
     fn delete_grapheme_removes_whole_emoji_grapheme() {
-        // Family emoji uses a ZWJ sequence; convert_string_to_content merges
+        // Family emoji uses a ZWJ sequence; fragments_from merges
         // it into a single TextFragment.  Deleting at any index that would
         // land in the middle shouldn't happen because the whole fragment is
         // one grapheme, but deleting the fragment itself should work.
@@ -287,7 +378,7 @@ mod tests {
         assert!(line.grapheme_count() >= 1);
 
         line.delete_grapheme(0);
-        assert_eq!(line.content.len(), 0);
+        assert_eq!(line.grapheme_count(), 0);
     }
 
     #[test]
@@ -496,5 +587,113 @@ mod tests {
         let line = Line::from("ab");
         assert_eq!(line.display_text_from(2), "");
         assert_eq!(line.display_text_from(100), "");
+    }
+
+    #[test]
+    fn text_returns_the_verbatim_line_content() {
+        let line = Line::from("café");
+        assert_eq!(line.text(), "café");
+        // Display writes the same verbatim text.
+        assert_eq!(line.to_string(), line.text());
+    }
+
+    #[test]
+    fn fragments_store_the_byte_index_of_their_grapheme() {
+        // 'é' (U+00E9) occupies two bytes in UTF-8, so the fragments after
+        // it must account for that.
+        let line = Line::from("caféx");
+        assert_eq!(byte_indices(&line), vec![0, 1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn insert_char_shifts_the_byte_indices_of_the_following_fragments() {
+        let mut line = Line::from("ab");
+        line.insert_char(1, 'X');
+        assert_eq!(line.text(), "aXb");
+        assert_eq!(byte_indices(&line), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn insert_multibyte_char_shifts_byte_indices_by_its_utf8_length() {
+        let mut line = Line::from("ab");
+        line.insert_char(1, 'é');
+        assert_eq!(line.text(), "aéb");
+        // 'a' (1 byte) + 'é' (2 bytes) → 'b' starts at byte 3.
+        assert_eq!(line.fragments[2].byte_index, 3);
+    }
+
+    #[test]
+    fn insert_char_at_end_extends_the_text() {
+        let mut line = Line::from("café");
+        line.insert_char(4, 'x');
+        assert_eq!(line.text(), "caféx");
+        assert_eq!(line.fragments[4].byte_index, 5);
+    }
+
+    #[test]
+    fn delete_grapheme_rebases_the_byte_indices_after_the_gap() {
+        let mut line = Line::from("café");
+        line.delete_grapheme(0); // remove 'c'
+        assert_eq!(line.text(), "afé");
+        assert_eq!(byte_indices(&line), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn split_at_keeps_byte_indices_consistent_in_both_halves() {
+        let mut line = Line::from("café");
+        let after = line.split_at(2);
+        assert_eq!(line.text(), "ca");
+        assert_eq!(after.text(), "fé");
+        assert_eq!(line.fragments[1].byte_index, 1);
+        assert_eq!(after.fragments[1].byte_index, 1); // 'é' inside "fé"
+    }
+
+    #[test]
+    fn appending_a_line_keeps_byte_indices_consistent() {
+        let mut line = Line::from("ca");
+        line.append(&Line::from("fé"));
+        assert_eq!(line.text(), "café");
+        assert_eq!(byte_indices(&line), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn appending_to_an_empty_line_yields_the_other_line() {
+        let mut line = Line::from("");
+        line.append(&Line::from("fé"));
+        assert_eq!(line.text(), "fé");
+        assert_eq!(line.grapheme_count(), 2);
+        assert_eq!(byte_indices(&line), vec![0, 1]);
+    }
+
+    #[test]
+    fn inserting_a_combining_mark_joins_the_previous_grapheme() {
+        let mut line = Line::from("cafe");
+        line.insert_char(3, '\u{301}'); // acute accent after 'f'
+        assert_eq!(line.text(), "caf\u{301}e");
+        // 'f' and the combining mark form one grapheme at byte 2.
+        assert_eq!(line.grapheme_count(), 4);
+        assert_eq!(line.grapheme_text(2), "f\u{301}");
+        assert_eq!(line.fragments[2].byte_index, 2);
+        assert_eq!(line.fragments[3].byte_index, 5);
+    }
+
+    #[test]
+    fn deleting_a_combined_grapheme_rebases_the_following_fragments() {
+        let mut line = Line::from("caf\u{301}e");
+        // 'f' + combining mark is a single grapheme at index 2.
+        line.delete_grapheme(2);
+        assert_eq!(line.text(), "cae");
+        assert_eq!(line.grapheme_count(), 3);
+        assert_eq!(byte_indices(&line), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn inserting_a_zwj_joins_the_neighbouring_emoji() {
+        let mut line = Line::from("👍🎉");
+        line.insert_char(1, '\u{200d}');
+        assert_eq!(line.text(), "👍\u{200d}🎉");
+        // The ZWJ joins the two emoji into one merged fragment.
+        assert_eq!(line.grapheme_count(), 1);
+        assert_eq!(line.fragments[0].byte_index, 0);
     }
 }

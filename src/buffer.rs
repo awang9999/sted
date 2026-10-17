@@ -40,7 +40,9 @@ impl Buffer {
         if let Some(file_name) = &self.file_name {
             let mut file = File::create(file_name)?;
             for line in &self.lines {
-                writeln!(file, "{line}")?;
+                // The line keeps its text verbatim, so saving writes it
+                // directly without re-assembling anything.
+                writeln!(file, "{}", line.text())?;
             }
             self.modified = false;
             Ok(())
@@ -123,7 +125,7 @@ impl Buffer {
             return;
         }
         let source = self.lines.remove(source_index);
-        self.lines[target_index].append(source);
+        self.lines[target_index].append(&source);
         self.modified = true;
     }
 }

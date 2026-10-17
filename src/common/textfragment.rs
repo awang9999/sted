@@ -6,30 +6,29 @@ pub enum GraphemeWidth {
     Tab,
 }
 
+/// Layout information for one grapheme cluster of a line. The grapheme
+/// itself is not stored: it is the slice of the line's text from
+/// `byte_index` to the next fragment's `byte_index` (or the end of the
+/// text), so the text has a single copy.
 #[derive(Clone)]
 pub struct TextFragment {
-    pub grapheme: String,
+    /// The byte index of this grapheme's first byte within the line's text,
+    /// as reported by `grapheme_indices`.
+    pub byte_index: usize,
     pub rendered_width: GraphemeWidth,
     pub replacement: Option<String>,
 }
 
 impl TextFragment {
     pub fn from(
-        grapheme: &str,
+        byte_index: usize,
         rendered_width: GraphemeWidth,
         replacement: Option<String>,
     ) -> Self {
         Self {
-            grapheme: grapheme.to_string(),
+            byte_index,
             rendered_width,
             replacement,
-        }
-    }
-
-    pub fn get_display_text(&self) -> &str {
-        match &self.replacement {
-            Some(replacement) => replacement.as_str(),
-            None => &self.grapheme,
         }
     }
 }
