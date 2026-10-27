@@ -131,7 +131,8 @@ impl Editor {
                 }
                 EditorCommand::Find => {
                     // Collect the pattern to search for on the command bar;
-                    // searching itself is not implemented yet.
+                    // while the prompt is open, the view tracks the first
+                    // match from the top of the buffer.
                     self.open_prompt(PromptPurpose::Find);
                 }
                 _ => self.view.handle_command(command),
@@ -169,7 +170,7 @@ impl Editor {
         // draws after the view (which may still redraw the message bar)
         // and it owns the terminal cursor.
         let caret_position = match &mut self.prompt {
-            Some(session) => session.render(),
+            Some(session) => session.render(&self.view),
             None => self.view.get_caret_position(),
         };
         let _ = Terminal::move_cursor_to_pos(&caret_position);
@@ -415,41 +416,96 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_the_search_prompt_does_nothing_yet() {
+    fn typing_in_the_search_prompt_moves_the_caret_to_the_first_match() {
         let mut editor = Editor::default();
-        let message_before = editor.view.get_message();
+        editor.view.handle_command(EditorCommand::Insert('a'));
+        editor.view.handle_command(EditorCommand::Insert('b'));
 
         editor.evaluate_event(ctrl_f());
-        editor.evaluate_event(key('a'));
-        editor.evaluate_event(press(KeyCode::Enter));
+        editor.evaluate_event(key('b'));
 
-        // Search is not implemented yet: the prompt stays open with its
-        // text, and the buffer and message bar are untouched.
         assert!(editor.prompt.is_some());
-        assert_eq!(
-            editor
-                .prompt
-                .as_ref()
-                .expect("the prompt is open")
-                .bar()
-                .get_text(),
-            "a"
-        );
-        assert_eq!(editor.view.get_status().total_lines, 0);
-        assert_eq!(editor.view.get_message(), message_before);
+        assert_eq!((editor.view.location.x, editor.view.location.y), (1, 0));
     }
 
     #[test]
-    fn escape_on_the_search_prompt_reports_search_aborted() {
+    fn typing_a_pattern_without_a_match_leaves_the_caret_where_it_is() {
         let mut editor = Editor::default();
+        editor.view.handle_command(EditorCommand::Insert('a'));
+        editor.view.handle_command(EditorCommand::Insert('b'));
+        // The caret sits at the end of "ab".
+        assert_eq!((editor.view.location.x, editor.view.location.y), (2, 0));
 
         editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('z'));
+
+        assert!(editor.prompt.is_some());
+        assert_eq!((editor.view.location.x, editor.view.location.y), (2, 0));
+    }
+
+    #[test]
+    fn a_pattern_that_stops_matching_returns_the_caret_to_where_the_search_started() {
+        let mut editor = Editor::default();
+        for c in "file".chars() {
+            editor.view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits after "file".
+        assert_eq!((editor.view.location.x, editor.view.location.y), (4, 0));
+
+        editor.evaluate_event(ctrl_f());
+        for c in "filo".chars() {
+            editor.evaluate_event(key(c));
+        }
+
+        // "filo" does not occur: the caret is back after "file", not
+        // sitting on the word its prefixes matched.
+        assert!(editor.prompt.is_some());
+        assert_eq!((editor.view.location.x, editor.view.location.y), (4, 0));
+    }
+
+    #[test]
+    fn enter_on_the_search_prompt_closes_it_and_keeps_the_caret_on_the_match() {
+        let mut editor = Editor::default();
+        editor.view.handle_command(EditorCommand::Insert('a'));
+        editor.view.handle_command(EditorCommand::Insert('b'));
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('b'));
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        assert!(editor.prompt.is_none());
+        assert_eq!((editor.view.location.x, editor.view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn enter_on_the_search_prompt_without_a_match_closes_it_and_keeps_the_caret() {
+        let mut editor = Editor::default();
+        editor.view.handle_command(EditorCommand::Insert('a'));
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('z'));
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        assert!(editor.prompt.is_none());
+        assert_eq!((editor.view.location.x, editor.view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn escape_on_the_search_prompt_restores_the_caret_and_reports_search_aborted() {
+        let mut editor = Editor::default();
+        editor.view.handle_command(EditorCommand::Insert('a'));
+        editor.view.handle_command(EditorCommand::Insert('b'));
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('a')); // the live search moves the caret to (0, 0)
         editor.evaluate_event(press(KeyCode::Esc));
 
         assert!(editor.prompt.is_none());
         let message = editor.view.get_message();
         assert_eq!(message.message, "Search aborted");
         assert_eq!(message.duration, LONG_MESSAGE_DURATION);
+        // The caret is back where it was when the search opened.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (2, 0));
     }
 
     #[test]

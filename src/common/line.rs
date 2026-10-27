@@ -140,6 +140,30 @@ impl Line {
         }
     }
 
+    /// The index of the grapheme that contains byte `byte_index` of the
+    /// line's text: the last grapheme starting at or before that byte.
+    /// Indices past the end of the text yield the index of the last
+    /// grapheme.
+    fn grapheme_index_at_byte(&self, byte_index: usize) -> usize {
+        self.fragments
+            .iter()
+            .take_while(|fragment| fragment.byte_index <= byte_index)
+            .count()
+            .saturating_sub(1)
+    }
+
+    /// The grapheme index of the first occurrence of `pattern` in the
+    /// line's text, or `None` when the line does not contain it.
+    ///
+    /// The pattern is located byte-wise with [`str::find`] and its byte
+    /// index is translated to the grapheme it falls in, so a match that
+    /// starts inside a grapheme cluster reports that cluster. The empty
+    /// pattern matches at the start of the line.
+    pub fn find(&self, pattern: &str) -> Option<usize> {
+        let byte_index = self.text.find(pattern)?;
+        Some(self.grapheme_index_at_byte(byte_index))
+    }
+
     /// Rebuilds the fragments from fragment `start` onward, reusing the
     /// untouched prefix. The line's text is the source of truth, so this
     /// re-derives the grapheme clusters and their byte indices for the part
@@ -241,37 +265,76 @@ impl Line {
     // the visible portion of the Line. If the start or end
     // of the visible range cuts off a grapheme, the character
     // U+2026 (…) replaces it.
-    pub fn get(&self, range: Range<usize>) -> String {
+    // Only the test suite renders a line through `get` so far; the editor
+    // draws its segments directly via [`Line::display_segments`].
+    #[allow(dead_code)]
+    pub fn get(&self, range: &Range<usize>) -> String {
+        self.display_segments(range, None)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    /// The visible portion of the line as display segments: the same
+    /// truncation and ellipses as [`Line::get`], but with the graphemes of
+    /// `highlight` — a range of this line's grapheme indices — marked
+    /// `true` so the caller can render them differently, e.g. in reverse
+    /// video for a search match.
+    ///
+    /// A grapheme straddling an edge of `range` is not drawn; an ellipsis
+    /// marks each edge that hides content.
+    pub fn display_segments(
+        &self,
+        range: &Range<usize>,
+        highlight: Option<&Range<usize>>,
+    ) -> Vec<(String, bool)> {
+        let mut segments: Vec<(String, bool)> = Vec::new();
         if self.fragments.is_empty() {
-            return String::new();
+            return segments;
         }
 
-        let mut segment = String::new();
         let mut idx = 0; // track index of grapheme vector
 
-        // Skip past graphemes before the visible range
+        // Skip past graphemes before the visible range: `idx` is the first
+        // grapheme starting at or inside the range.
         while idx < self.fragments.len() && self.width_until(idx) < range.start {
             idx = idx.saturating_add(1);
         }
 
-        // Truncation at range.start?
-        if idx > 0 && self.width_until(idx.saturating_sub(1)) < range.start {
-            segment.push('…');
-            idx = idx.saturating_add(1);
+        // Truncation at range.start? The previous grapheme hides content
+        // only when it starts before the range AND still extends past it;
+        // a grapheme ending exactly at the edge is fully outside.
+        if idx > 0
+            && self.width_until(idx.saturating_sub(1)) < range.start
+            && self.width_until(idx) > range.start
+        {
+            segments.push((String::from('…'), false));
         }
 
-        // Add graphemes within the visible range
+        // Add graphemes within the visible range, marking the ones the
+        // highlight covers; consecutive graphemes with the same marking
+        // join one segment.
         while idx < self.fragments.len() && self.width_until(idx.saturating_add(1)) <= range.end {
-            segment.push_str(self.display_text_of(idx));
+            let highlighted = highlight
+                .as_ref()
+                .is_some_and(|h| h.contains(&idx));
+            match segments.last_mut() {
+                Some((text, marked)) if *marked == highlighted => {
+                    text.push_str(self.display_text_of(idx));
+                }
+                _ => segments.push((self.display_text_of(idx).to_string(), highlighted)),
+            }
             idx = idx.saturating_add(1);
         }
 
-        // Truncation at range.end?
-        if idx < self.fragments.len() && self.width_until(idx) > range.end {
-            segment.push('…');
+        // Truncation at range.end? Any grapheme left undrawn means the
+        // range cut off content, whether it straddled the edge or starts
+        // past it.
+        if idx < self.fragments.len() {
+            segments.push((String::from('…'), false));
         }
 
-        segment
+        segments
     }
 
     pub fn grapheme_count(&self) -> usize {
@@ -566,7 +629,111 @@ mod tests {
     #[test]
     fn get_renders_a_tab_as_tab_width_spaces() {
         let line = Line::from("a\tb");
-        assert_eq!(line.get(0..10), "a    b");
+        assert_eq!(line.get(&(0..10)), "a    b");
+    }
+
+    #[test]
+    fn get_keeps_the_grapheme_that_starts_at_the_left_edge() {
+        let line = Line::from("abcdef");
+        assert_eq!(line.get(&(1..7)), "bcdef");
+        assert_eq!(line.get(&(2..7)), "cdef");
+    }
+
+    #[test]
+    fn get_ellipses_a_grapheme_straddling_the_left_edge_and_keeps_the_rest() {
+        // Columns: a=0, b=1, 中=2..4, c=4, d=5, e=6.
+        let line = Line::from("ab中cde");
+        // 中 straddles column 3, so it is elided — but c..e stay.
+        assert_eq!(line.get(&(3..10)), "…cde");
+        // 中 ends exactly at column 4: it is fully outside, no ellipsis.
+        assert_eq!(line.get(&(4..10)), "cde");
+    }
+
+    #[test]
+    fn get_ellipses_content_hidden_by_the_right_edge() {
+        let line = Line::from("abcdef");
+        // f straddles column 5: it is cut off, marked with an ellipsis.
+        assert_eq!(line.get(&(0..5)), "abcde…");
+        // d starts exactly at column 3: still hidden, still elided.
+        assert_eq!(line.get(&(0..3)), "abc…");
+        // Nothing hidden past the edge: no ellipsis.
+        assert_eq!(line.get(&(0..6)), "abcdef");
+    }
+
+    fn segments_as_pairs(segments: &[(String, bool)]) -> Vec<(&str, bool)> {
+        segments.iter().map(|(text, hl)| (text.as_str(), *hl)).collect()
+    }
+
+    #[test]
+    fn display_segments_without_a_highlight_match_get() {
+        let line = Line::from("abcdef");
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(1..7), None)),
+            vec![("bcdef", false)]
+        );
+        // A straddling grapheme at the left edge is elided; the ellipsis
+        // joins the unmarked text that follows it.
+        let wide = Line::from("ab中cde");
+        assert_eq!(
+            segments_as_pairs(&wide.display_segments(&(3..10), None)),
+            vec![("…cde", false)]
+        );
+        // 中 starts exactly at column 2: no left ellipsis; d starts
+        // exactly at column 5: hidden, elided. The right ellipsis stays
+        // its own segment.
+        assert_eq!(
+            segments_as_pairs(&wide.display_segments(&(2..5), None)),
+            vec![("中c", false), ("…", false)]
+        );
+    }
+
+    #[test]
+    fn display_segments_marks_the_graphemes_of_the_highlight() {
+        let line = Line::from("hello world");
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&(6..11)))),
+            vec![("hello ", false), ("world", true)]
+        );
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&(0..5)))),
+            vec![("hello", true), (" world", false)]
+        );
+        // A highlight past the end of the line marks what it covers.
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&(8..100)))),
+            vec![("hello wo", false), ("rld", true)]
+        );
+    }
+
+    #[test]
+    fn display_segments_clips_the_highlight_to_the_visible_range() {
+        // Columns: h=0..e=4, space=5, w=6..d=10.
+        let line = Line::from("hello world");
+        // The window [3..9) shows "lo wor": the highlight 6..11 reaches
+        // only w, o, r before the ellipsis cuts the rest.
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(3..9), Some(&(6..11)))),
+            vec![("lo ", false), ("wor", true), ("…", false)]
+        );
+        // A highlight that starts left of the window is clipped at it:
+        // it still covers l, o, space and w, which are visible.
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(3..20), Some(&(0..7)))),
+            vec![("lo w", true), ("orld", false)]
+        );
+        // A highlight fully outside the window leaves every segment plain.
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(3..9), Some(&(0..3)))),
+            vec![("lo wor", false), ("…", false)]
+        );
+    }
+
+    #[test]
+    fn display_segments_of_an_empty_line_is_empty() {
+        assert_eq!(
+            Line::from("").display_segments(&(0..10), None),
+            Vec::<(String, bool)>::new()
+        );
     }
 
     #[test]
@@ -595,6 +762,74 @@ mod tests {
         assert_eq!(line.text(), "café");
         // Display writes the same verbatim text.
         assert_eq!(line.to_string(), line.text());
+    }
+
+    #[test]
+    fn find_returns_the_grapheme_index_of_the_match() {
+        let line = Line::from("hello world");
+        assert_eq!(line.find("world"), Some(6));
+        assert_eq!(line.find("hello"), Some(0));
+        assert_eq!(line.find("lo wo"), Some(3));
+    }
+
+    #[test]
+    fn find_of_a_multibyte_pattern_translates_the_byte_index() {
+        // 'é' is two bytes in UTF-8, so "café" spans five bytes while the
+        // grapheme index of 'é' is 3.
+        let line = Line::from("café");
+        assert_eq!(line.find("é"), Some(3));
+        assert_eq!(line.find("café"), Some(0));
+        // "fé" starts at byte 2, the byte index of 'f'.
+        assert_eq!(line.find("fé"), Some(2));
+    }
+
+    #[test]
+    fn find_reports_the_grapheme_containing_a_match_inside_a_cluster() {
+        // The combining mark after 'f' forms one grapheme with it, at
+        // index 2 of "café" (f + U+0301 + e).
+        let line = Line::from("caf\u{301}e");
+        assert_eq!(line.find("\u{301}"), Some(2));
+        assert_eq!(line.find("caf"), Some(0));
+        assert_eq!(line.find("e"), Some(3));
+    }
+
+    #[test]
+    fn find_on_a_line_with_tabs_counts_tabs_as_graphemes() {
+        let line = Line::from("a\tb c");
+        assert_eq!(line.find("b"), Some(2));
+        assert_eq!(line.find("c"), Some(4));
+    }
+
+    #[test]
+    fn find_without_a_match_is_none() {
+        let line = Line::from("abc");
+        assert_eq!(line.find("d"), None);
+        assert_eq!(line.find("abcd"), None);
+    }
+
+    #[test]
+    fn find_on_an_empty_line_is_none() {
+        let line = Line::from("");
+        assert_eq!(line.find("a"), None);
+    }
+
+    #[test]
+    fn find_of_an_empty_pattern_matches_at_the_start_of_the_line() {
+        assert_eq!(Line::from("abc").find(""), Some(0));
+        assert_eq!(Line::from("").find(""), Some(0));
+    }
+
+    #[test]
+    fn grapheme_index_at_byte_yields_the_grapheme_containing_the_byte() {
+        // "caféx": byte indices 0, 1, 2, 3 ('é' spans 3..5), 5.
+        let line = Line::from("caféx");
+        assert_eq!(line.grapheme_index_at_byte(0), 0);
+        assert_eq!(line.grapheme_index_at_byte(3), 3);
+        // Byte 4 is the second byte of 'é': it falls in grapheme 3.
+        assert_eq!(line.grapheme_index_at_byte(4), 3);
+        assert_eq!(line.grapheme_index_at_byte(5), 4);
+        // Past the end of the text: the last grapheme.
+        assert_eq!(line.grapheme_index_at_byte(100), 4);
     }
 
     #[test]

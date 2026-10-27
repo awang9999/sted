@@ -17,6 +17,19 @@ impl Buffer {
         self.lines.is_empty()
     }
 
+    /// The location of the first occurrence of `pattern`, scanning the
+    /// lines from the top of the buffer: `None` when no line contains the
+    /// pattern. An empty pattern is not a search and matches nothing.
+    pub fn find(&self, pattern: &str) -> Option<Location> {
+        if pattern.is_empty() {
+            return None;
+        }
+        self.lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| line.find(pattern).map(|x| Location { x, y }))
+    }
+
     /// Reads the file at `file_path` into a new buffer.
     ///
     /// Returns an error with a user-facing message if the file could not be
@@ -458,6 +471,58 @@ mod tests {
     fn new_buffer_has_no_file_name() {
         let buf = Buffer::default();
         assert!(buf.file_name.is_none());
+    }
+
+    #[test]
+    fn find_returns_the_first_match_from_the_top() {
+        let buf = make_buffer(&["alpha", "beta", "alpha"]);
+
+        assert_eq!(buf.find("alpha"), Some(Location { x: 0, y: 0 }));
+        assert_eq!(buf.find("beta"), Some(Location { x: 0, y: 1 }));
+    }
+
+    #[test]
+    fn find_reports_the_grapheme_column_of_the_match() {
+        let buf = make_buffer(&["hello world"]);
+
+        assert_eq!(buf.find("world"), Some(Location { x: 6, y: 0 }));
+    }
+
+    #[test]
+    fn find_of_a_multibyte_pattern_counts_graphemes_not_bytes() {
+        // 'é' is two bytes in UTF-8 but one grapheme, so "latte" starts at
+        // grapheme 5 of "café latte".
+        let buf = make_buffer(&["café latte"]);
+
+        assert_eq!(buf.find("latte"), Some(Location { x: 5, y: 0 }));
+    }
+
+    #[test]
+    fn find_on_lines_with_tabs_counts_tabs_as_graphemes() {
+        let buf = make_buffer(&["a\tb c"]);
+
+        assert_eq!(buf.find("c"), Some(Location { x: 4, y: 0 }));
+    }
+
+    #[test]
+    fn find_without_a_match_is_none() {
+        let buf = make_buffer(&["abc", "def"]);
+
+        assert_eq!(buf.find("z"), None);
+    }
+
+    #[test]
+    fn find_of_an_empty_pattern_is_none() {
+        let buf = make_buffer(&["abc"]);
+
+        assert_eq!(buf.find(""), None);
+    }
+
+    #[test]
+    fn find_on_an_empty_buffer_is_none() {
+        let buf = Buffer::default();
+
+        assert_eq!(buf.find("a"), None);
     }
 
     #[test]

@@ -143,6 +143,18 @@ impl Terminal {
         Ok(())
     }
 
+    /// Prints `string` in reverse video at the cursor's current position,
+    /// continuing the row rather than rewriting it.
+    pub fn print_inverted(string: &str) -> Result<(), Error> {
+        let inverted_str = format!(
+            "{}{}{}",
+            Attribute::Reverse, string,
+            Attribute::Reset
+        );
+        Self::print(&inverted_str)?;
+        Ok(())
+    }
+
     pub fn execute() -> Result<(), Error> {
         stdout().flush()?;
         Ok(())

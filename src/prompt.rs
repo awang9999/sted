@@ -1,5 +1,6 @@
 use crate::commandbar::{CommandBar, CommandBarOutcome};
 use crate::common::constants::LONG_MESSAGE_DURATION;
+use crate::common::types::Location;
 use crate::editorcommand::EditorCommand;
 use crate::terminal::Position;
 use crate::view::View;
@@ -7,7 +8,10 @@ use crate::view::View;
 /// The prompt text of the save-as prompt.
 const SAVE_AS_PROMPT: &str = "Save as: ";
 /// The prompt text of the search prompt.
-const SEARCH_PROMPT: &str = "Search: ";
+const SEARCH_PROMPT: &str = "Search (Esc to cancel): ";
+/// Shown on the command bar right of the typed pattern while a search
+/// matches nothing in the buffer.
+const NO_MATCHES: &str = "(No matches)";
 
 /// What a prompt open on the command bar is asking for.
 ///
@@ -15,7 +19,7 @@ const SEARCH_PROMPT: &str = "Search: ";
 /// and its arms in [`PromptPurpose::config`],
 /// [`PromptPurpose::closes_on_confirmation`], and [`PromptPurpose::apply`]
 /// — the command bar and the editor stay untouched.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptPurpose {
     /// Collects the file name to save the current document to.
     SaveAs,
@@ -34,21 +38,19 @@ impl PromptPurpose {
         }
     }
 
-    /// Whether confirming the prompt closes it: a save-as confirmation
-    /// saves to the entered file name, while the search prompt does not
-    /// act on its text yet, so confirming it leaves it open.
+    /// Whether confirming the prompt closes it: both purposes act on
+    /// their entered text, so a confirmation always closes the prompt. A
+    /// purpose that keeps the prompt open on Enter would return false
+    /// here.
     fn closes_on_confirmation(self) -> bool {
         match self {
-            PromptPurpose::SaveAs => true,
-            PromptPurpose::Find => false,
+            PromptPurpose::SaveAs | PromptPurpose::Find => true,
         }
     }
 
     /// Reacts to a closed prompt: a confirmation acts on the entered text
     /// according to the purpose, a cancellation reports on the message
-    /// bar. A purpose that does not close on confirmation (see
-    /// [`PromptPurpose::closes_on_confirmation`]) never sees a
-    /// confirmation.
+    /// bar.
     fn apply(self, view: &mut View, resolution: PromptResolution) {
         match (self, resolution) {
             (PromptPurpose::SaveAs, PromptResolution::Confirmed(file_name)) => {
@@ -57,11 +59,17 @@ impl PromptPurpose {
             (PromptPurpose::SaveAs, PromptResolution::Cancelled) => {
                 view.set_message(String::from("Save aborted"), LONG_MESSAGE_DURATION);
             }
-            // Search is not implemented yet, so a confirmation never
-            // reaches this arm (see `closes_on_confirmation`).
-            (PromptPurpose::Find, PromptResolution::Confirmed(_)) => {}
+            // Leaving the search on Enter puts the caret on the match, so
+            // the user can continue editing there; a pattern without a
+            // match leaves the caret where it is. Either way the prompt
+            // closed, so the view stops highlighting the match.
+            (PromptPurpose::Find, PromptResolution::Confirmed(pattern)) => {
+                view.find_first(&pattern);
+                view.clear_live_search();
+            }
             (PromptPurpose::Find, PromptResolution::Cancelled) => {
                 view.set_message(String::from("Search aborted"), LONG_MESSAGE_DURATION);
+                view.clear_live_search();
             }
         }
     }
@@ -84,6 +92,9 @@ pub enum PromptResolution {
 pub struct PromptSession {
     bar: CommandBar,
     purpose: PromptPurpose,
+    /// The caret position the buffer had when a find prompt opened, so
+    /// dismissing the search can restore it.
+    find_origin: Option<Location>,
 }
 
 impl PromptSession {
@@ -95,23 +106,49 @@ impl PromptSession {
         if let Some(initial_text) = initial_text {
             bar = bar.with_initial_text(initial_text);
         }
-        Self { bar, purpose }
+        // A find prompt moves the caret while it is open; remember where
+        // it was so dismissing the search can restore it.
+        let find_origin = (purpose == PromptPurpose::Find).then_some(view.location);
+        Self {
+            bar,
+            purpose,
+            find_origin,
+        }
     }
 
     /// Routes a command to the prompt's bar and reports how the prompt
     /// closed, or `None` while it stays open.
+    ///
+    /// While a find prompt is open, every change to the typed pattern
+    /// re-runs the live search: the caret tracks the first match from the
+    /// top of the buffer and the view highlights the match, while the
+    /// caret returns to where the search began when the pattern stops
+    /// matching. Caret movement inside the prompt keeps the current match.
     pub fn handle(&mut self, view: &mut View, command: EditorCommand) -> Option<PromptResolution> {
         // The viewport resizes together with the prompt.
         if let EditorCommand::Resize(size) = command {
             view.resize(size);
         }
 
+        // The live search re-runs only when the typed pattern changes.
+        let pattern_before = self.bar.get_text();
+
         match self.bar.handle_command(command) {
-            CommandBarOutcome::Stay => None,
+            CommandBarOutcome::Stay => {
+                if self.purpose == PromptPurpose::Find
+                    && let Some(origin) = self.find_origin
+                    && self.bar.get_text() != pattern_before
+                {
+                    // A pattern without a match puts the caret back where
+                    // the search began, so it never lingers on a word the
+                    // pattern only partially matches.
+                    view.update_live_search(&self.bar.get_text(), origin);
+                }
+                None
+            }
             CommandBarOutcome::Confirmed(text) => {
                 // The purpose decides whether a confirmation closes the
-                // prompt (the search prompt does not act on its text yet,
-                // so Enter leaves it open with the typed text).
+                // prompt.
                 if self.purpose.closes_on_confirmation() {
                     Some(PromptResolution::Confirmed(text))
                 } else {
@@ -123,15 +160,37 @@ impl PromptSession {
     }
 
     /// Applies the purpose-specific reaction to a closed prompt.
+    ///
+    /// Dismissing a find prompt also restores the caret position the
+    /// buffer had when the search opened and scrolls it into view.
     pub fn resolve(&self, view: &mut View, resolution: PromptResolution) {
+        // `apply` consumes the resolution, so detect the dismissal before
+        // reacting to it.
+        let dismissed = matches!(resolution, PromptResolution::Cancelled);
         self.purpose.apply(view, resolution);
+        if dismissed && let Some(origin) = self.find_origin {
+            view.set_location_and_scroll(origin);
+        }
     }
 
     /// Renders the prompt's bar and returns the on-screen position of its
     /// caret.
-    pub fn render(&mut self) -> Position {
-        self.bar.render();
+    ///
+    /// While a find prompt is open and its pattern matches nothing, the
+    /// bar shows "(No matches)" right of the typed text; an empty pattern
+    /// is no search yet, so it shows nothing.
+    pub fn render(&mut self, view: &View) -> Position {
+        self.bar.render(self.no_match_note(view));
         self.bar.get_caret_position()
+    }
+
+    /// The note the bar shows right of the typed text: `NO_MATCHES` while
+    /// a non-empty find pattern matches nothing in the buffer.
+    fn no_match_note(&self, view: &View) -> Option<&'static str> {
+        (self.purpose == PromptPurpose::Find
+            && !self.bar.is_empty()
+            && !view.live_search_has_match())
+        .then_some(NO_MATCHES)
     }
 
     /// The input bar behind the prompt.
@@ -146,6 +205,7 @@ impl PromptSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editorcommand::Direction;
     use crate::terminal::Size;
 
     fn view() -> View {
@@ -168,20 +228,271 @@ mod tests {
         let view = view();
         let session = PromptSession::open(&view, PromptPurpose::Find);
         assert!(session.bar().is_empty());
-        // The caret sits right behind the "Search: " prompt.
+        // The caret sits right behind the "Search (Esc to cancel): " prompt.
         assert_eq!(session.bar().get_caret_position().col, SEARCH_PROMPT.len());
         assert_eq!(session.bar().get_caret_position().row, 23);
     }
 
     #[test]
-    fn handle_keeps_the_search_prompt_open_on_enter() {
+    fn handle_closes_the_search_prompt_on_enter_with_the_typed_pattern() {
         let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        // The live search already moved the caret to the match while the
+        // prompt stayed open.
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+        assert_eq!(
+            session.handle(&mut view, EditorCommand::Enter),
+            Some(PromptResolution::Confirmed(String::from("b")))
+        );
+    }
+
+    #[test]
+    fn handle_of_the_search_prompt_tracks_the_first_match_while_typing() {
+        // The first "foo " is followed by "cat", so only once "b" is typed
+        // does the first match jump to the second "foo ".
+        let mut view = view();
+        for c in "foo cat foo bar".chars() {
+            view.handle_command(EditorCommand::Insert(c));
+        }
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('f'));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        session.handle(&mut view, EditorCommand::Insert('o'));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        session.handle(&mut view, EditorCommand::Insert('o'));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        session.handle(&mut view, EditorCommand::Insert(' '));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+    }
+
+    #[test]
+    fn handle_of_the_search_prompt_without_a_match_keeps_the_caret_at_the_search_origin() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(1, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('z'));
+
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn handle_of_the_search_prompt_with_the_pattern_erased_keeps_the_caret_at_the_search_origin() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(1, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('z'));
+        // Erasing the pattern back to empty matches nothing, so the caret
+        // stays at the search origin.
+        session.handle(&mut view, EditorCommand::BackSpace);
+
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn a_pattern_that_stops_matching_returns_the_caret_to_the_search_origin() {
+        let mut view = view();
+        for c in "file is here".chars() {
+            view.handle_command(EditorCommand::Insert(c));
+        }
+        // The search starts with the caret past "file".
+        view.set_location(10, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        for c in "fil".chars() {
+            session.handle(&mut view, EditorCommand::Insert(c));
+        }
+        // Each prefix of "filo" matches inside "file".
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        // "filo" matches nothing: the caret returns where the search
+        // began instead of sitting on "file".
+        session.handle(&mut view, EditorCommand::Insert('o'));
+        assert_eq!((view.location.x, view.location.y), (10, 0));
+
+        // Backspacing to a matching pattern finds the match again.
+        session.handle(&mut view, EditorCommand::BackSpace);
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn the_live_search_updates_with_the_typed_pattern() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        assert_eq!(view.live_search_pattern(), Some("b"));
+        session.handle(&mut view, EditorCommand::BackSpace);
+        // Erasing the pattern back to empty clears the match it found.
+        assert_eq!(view.live_search_pattern(), Some(""));
+    }
+
+    #[test]
+    fn caret_movement_in_the_search_prompt_keeps_the_live_search() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        session.handle(&mut view, EditorCommand::Move(Direction::Left));
+
+        // The pattern did not change, so neither did the match.
+        assert_eq!(view.live_search_pattern(), Some("b"));
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn closing_the_search_prompt_clears_the_live_search() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        let resolution = session.handle(&mut view, EditorCommand::Enter);
+        session.resolve(&mut view, resolution.expect("Enter closes the prompt"));
+
+        assert_eq!(view.live_search_pattern(), None);
+    }
+
+    #[test]
+    fn dismissing_the_search_prompt_clears_the_live_search() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        let resolution = session.handle(&mut view, EditorCommand::Escape);
+        session.resolve(&mut view, resolution.expect("Esc closes the prompt"));
+
+        assert_eq!(view.live_search_pattern(), None);
+    }
+
+    #[test]
+    fn the_save_prompt_does_not_start_a_live_search() {
+        let mut view = view();
+        let mut session = PromptSession::open(&view, PromptPurpose::SaveAs);
+
         session.handle(&mut view, EditorCommand::Insert('a'));
-        // Search is not implemented yet: Enter does nothing and the
-        // prompt stays open with its text.
-        assert!(session.handle(&mut view, EditorCommand::Enter).is_none());
-        assert_eq!(session.bar().get_text(), "a");
+
+        assert_eq!(view.live_search_pattern(), None);
+    }
+
+    #[test]
+    fn a_find_pattern_without_a_match_gets_the_no_matches_note() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('z'));
+
+        assert_eq!(session.no_match_note(&view), Some(NO_MATCHES));
+    }
+
+    #[test]
+    fn a_matching_find_pattern_has_no_note() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('b'));
+
+        assert_eq!(session.no_match_note(&view), None);
+    }
+
+    #[test]
+    fn the_no_matches_note_follows_the_pattern_live() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('z'));
+        assert_eq!(session.no_match_note(&view), Some(NO_MATCHES));
+        // Backspacing to an empty pattern is no search yet: no note.
+        session.handle(&mut view, EditorCommand::BackSpace);
+        assert_eq!(session.no_match_note(&view), None);
+        // A matching pattern has no note either.
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        assert_eq!(session.no_match_note(&view), None);
+        // The note comes back when the pattern stops matching.
+        session.handle(&mut view, EditorCommand::Insert('z'));
+        assert_eq!(session.no_match_note(&view), Some(NO_MATCHES));
+    }
+
+    #[test]
+    fn an_empty_find_pattern_has_no_note() {
+        let view = view();
+        let session = PromptSession::open(&view, PromptPurpose::Find);
+
+        assert_eq!(session.no_match_note(&view), None);
+    }
+
+    #[test]
+    fn the_save_prompt_has_no_note() {
+        let mut view = view();
+        let mut session = PromptSession::open(&view, PromptPurpose::SaveAs);
+
+        session.handle(&mut view, EditorCommand::Insert('a'));
+
+        assert_eq!(session.no_match_note(&view), None);
+    }
+
+    #[test]
+    fn resolve_confirmation_of_the_search_prompt_leaves_the_caret_on_the_match() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(0, 0);
+        let session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.resolve(&mut view, PromptResolution::Confirmed(String::from("b")));
+
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn resolve_cancellation_of_the_search_prompt_restores_the_caret() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.resolve(&mut view, PromptResolution::Cancelled);
+
+        // The caret was at the end of the text when the search opened.
+        assert_eq!((view.location.x, view.location.y), (2, 0));
+    }
+
+    #[test]
+    fn dismissing_a_search_restores_the_caret_the_search_moved() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('a'));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        let resolution = session.handle(&mut view, EditorCommand::Escape);
+        assert_eq!(resolution, Some(PromptResolution::Cancelled));
+        session.resolve(&mut view, PromptResolution::Cancelled);
+
+        assert_eq!((view.location.x, view.location.y), (2, 0));
     }
 
     #[test]

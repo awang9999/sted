@@ -177,23 +177,36 @@ impl CommandBar {
         }
     }
 
-    pub fn render(&mut self) {
+    /// Draws the bar's row, optionally with a trailing note (like
+    /// "(No matches)") right of the typed text, after the caret.
+    pub fn render(&mut self, trailing: Option<&str>) {
         let row = self.layout.row();
-        let text = self.as_line();
+        let text = self.as_line(trailing);
         let _ = Terminal::clear_row(row);
         let result = Terminal::print_row(row, &text);
         debug_assert!(result.is_ok(), "Failed to render command bar");
     }
 
     /// The bar's row as it will be drawn: the prompt, an ellipsis when the
-    /// text does not fit, and as much of the text's tail as the bar holds.
-    fn as_line(&self) -> String {
+    /// text does not fit, as much of the text's tail as the bar holds, and
+    /// — when given — `trailing` right of the typed text. The note is
+    /// display-only: it never affects the caret position or which part of
+    /// the text is elided.
+    fn as_line(&self, trailing: Option<&str>) -> String {
         let (visible_from, elided) = self.visible_range();
         let mut text = self.prompt.clone();
         if elided {
             text.push(ELLIPSIS);
         }
         text.push_str(&self.line.display_text_from(visible_from));
+        if let Some(trailing) = trailing {
+            // The note is separated from the row's content by a space,
+            // unless the row holds only the prompt.
+            if text.width() > self.prompt.width() {
+                text.push(' ');
+            }
+            text.push_str(trailing);
+        }
         fit_to_width(&text, self.layout.width())
     }
 
@@ -388,14 +401,14 @@ mod tests {
     #[test]
     fn as_line_shows_the_prompt_followed_by_the_text() {
         let bar = bar_with_text("abc", 80);
-        assert_eq!(bar.as_line(), "Save as: abc");
+        assert_eq!(bar.as_line(None), "Save as: abc");
     }
 
     #[test]
     fn as_line_is_untouched_when_the_text_fits_exactly() {
         // 9 prompt columns + 3 text columns.
         let bar = bar_with_text("abc", 12);
-        assert_eq!(bar.as_line(), "Save as: abc");
+        assert_eq!(bar.as_line(None), "Save as: abc");
     }
 
     #[test]
@@ -403,7 +416,7 @@ mod tests {
         // 16 text columns in 11 available: 1 column for the ellipsis, 10
         // for the tail.
         let bar = bar_with_text("0123456789abcdef", 20);
-        assert_eq!(bar.as_line(), "Save as: …6789abcdef");
+        assert_eq!(bar.as_line(None), "Save as: …6789abcdef");
     }
 
     #[test]
@@ -411,7 +424,7 @@ mod tests {
         // Columns: a=0, b=1, 中=2..3, c=4, d=5, e=6; 3 columns available
         // (2 for the tail) start at column 5, so 中 and c are elided.
         let bar = bar_with_text("ab中cde", 12);
-        assert_eq!(bar.as_line(), "Save as: …de");
+        assert_eq!(bar.as_line(None), "Save as: …de");
     }
 
     #[test]
@@ -420,7 +433,7 @@ mod tests {
         // (3 for the tail) start at column 4, where 中 ends exactly, so 中
         // is elided but c..e fit.
         let bar = bar_with_text("ab中cde", 13);
-        assert_eq!(bar.as_line(), "Save as: …cde");
+        assert_eq!(bar.as_line(None), "Save as: …cde");
     }
 
     #[test]
@@ -429,13 +442,13 @@ mod tests {
         // available (4 for the tail) start at column 4, exactly where 中
         // begins, so 中 fits entirely and is kept.
         let bar = bar_with_text("abcd中ef", 14);
-        assert_eq!(bar.as_line(), "Save as: …中ef");
+        assert_eq!(bar.as_line(None), "Save as: …中ef");
     }
 
     #[test]
     fn as_line_renders_tabs_as_spaces() {
         let bar = bar_with_text("\ta", 80);
-        assert_eq!(bar.as_line(), "Save as:     a");
+        assert_eq!(bar.as_line(None), "Save as:     a");
     }
 
     #[test]
@@ -443,7 +456,48 @@ mod tests {
         // Narrower than the prompt itself: nothing of the prompt's tail or
         // the text can fit.
         let bar = bar_with_text("abcdef", 4);
-        assert_eq!(bar.as_line(), "Save");
+        assert_eq!(bar.as_line(None), "Save");
+    }
+
+    #[test]
+    fn as_line_appends_the_trailing_note_right_of_the_text() {
+        let bar = bar_with_text("abc", 80);
+        assert_eq!(
+            bar.as_line(Some("(No matches)")),
+            "Save as: abc (No matches)"
+        );
+    }
+
+    #[test]
+    fn as_line_appends_the_trailing_note_after_an_empty_text() {
+        let bar = bar(80);
+        assert_eq!(bar.as_line(Some("(No matches)")), "Save as: (No matches)");
+    }
+
+    #[test]
+    fn the_trailing_note_does_not_change_which_text_is_visible() {
+        // 16 text columns in 11 available: the same tail is elided with or
+        // without the note; at this width the note simply does not fit.
+        let bar = bar_with_text("0123456789abcdef", 20);
+        assert_eq!(
+            bar.as_line(Some("(No matches)")),
+            bar.as_line(None)
+        );
+        assert_eq!(
+            bar.as_line(Some("(No matches)")),
+            "Save as: …6789abcdef"
+        );
+    }
+
+    #[test]
+    fn as_line_clips_the_trailing_note_to_the_bar_width() {
+        // 9 prompt + 16 text + 13 note = 38 columns; 33 leaves the note
+        // seven columns short.
+        let bar = bar_with_text("0123456789abcdef", 33);
+        assert_eq!(
+            bar.as_line(Some("(No matches)")),
+            "Save as: 0123456789abcdef (No mat"
+        );
     }
 
     #[test]
