@@ -427,9 +427,12 @@ impl View {
             }
         }
 
-        // Apply the new scroll offset and mark dirty if the view changed
+        // Apply the new scroll offset. A changed scroll needs a
+        // re-render, but a pending one from an earlier buffer change
+        // must not be cleared: re-rendering is the only way that change
+        // becomes visible.
         self.scroll_offset = scroll;
-        self.modified = scroll.col != prev.col || scroll.row != prev.row;
+        self.modified = self.modified || scroll.col != prev.col || scroll.row != prev.row;
     }
 
     pub fn set_location(&mut self, x: usize, y: usize) {
@@ -440,15 +443,20 @@ impl View {
         self.location = pos;
     }
 
-    /// Moves the caret to the first occurrence of `pattern`, scanning the
-    /// buffer from the top, and scrolls it into view.
+    /// Moves the caret to the first occurrence of `pattern` at or after
+    /// the current caret position, scanning forward through the buffer;
+    /// when nothing matches after the caret, the search wraps to the top
+    /// of the buffer, so a match is found whenever the buffer contains
+    /// the pattern at all. Centers the match in the viewport so it is
+    /// clearly visible.
     ///
     /// Returns whether a match was found; a pattern the buffer does not
-    /// contain — including the empty one — leaves the caret where it is.
+    /// contain anywhere — including the empty one — leaves the caret
+    /// where it is.
     pub fn find_first(&mut self, pattern: &str) -> bool {
-        match self.buffer.find(pattern) {
+        match self.buffer.find_wrapping(pattern, self.location) {
             Some(location) => {
-                self.set_location_and_scroll(location);
+                self.set_location_and_center(location);
                 true
             }
             None => false,
@@ -466,16 +474,108 @@ impl View {
         self.scroll_location_into_view();
     }
 
+    /// Moves the caret to `location` and scrolls the viewport so the
+    /// location sits at its center, making a search match clearly
+    /// visible instead of landing at the edge of the viewport.
+    pub fn set_location_and_center(&mut self, location: Location) {
+        self.set_location(location.x, location.y);
+        self.desired_x = location.x;
+        self.center_location();
+    }
+
+    /// Scrolls the viewport to the center of the caret: its row at the
+    /// middle of the viewport and its column at the middle of the
+    /// viewport's width, each clamped so the viewport never scrolls above
+    /// the start of the document, below its last line, or past the end of
+    /// the caret's line.
+    fn center_location(&mut self) {
+        let (x, y) = (self.location.x, self.location.y);
+        let Size { width, height } = self.size;
+        let mut scroll = self.scroll_offset;
+
+        // Vertical: the caret's row at the middle of the viewport,
+        // clamped to the last row the document scrolls to.
+        let target_row = y.saturating_sub(height.saturating_div(2));
+        let last_row = self.buffer.lines.len().saturating_sub(height);
+        scroll.row = target_row.min(last_row);
+
+        // Horizontal: the caret's column at the middle of the viewport's
+        // width, clamped to the line's length.
+        let clamped_y = y.min(self.buffer.lines.len().saturating_sub(1));
+        if let Some(line) = self.buffer.lines.get(clamped_y) {
+            let line_len = line.width_until(line.grapheme_count());
+            let target_col = line.width_until(x).saturating_sub(width.saturating_div(2));
+            scroll.col = target_col.min(line_len.saturating_sub(width));
+            // Persist the new horizontal scroll to the line, as the
+            // into-view scrolling does.
+            if let Some(line) = self.buffer.lines.get_mut(clamped_y) {
+                line.scroll_x = scroll.col;
+            }
+        }
+
+        self.scroll_offset = scroll;
+        self.modified = true;
+    }
+
     /// Updates the live search shown in the buffer while the search prompt
-    /// is open: stores `pattern` so its first match is highlighted on the
-    /// next render, moves the caret to that match, or back to `origin`
-    /// when the pattern matches nothing.
+    /// is open: stores `pattern` so its first match at or after `origin`,
+    /// wrapping to the top of the buffer when nothing matches after
+    /// `origin`, is highlighted on the next render and the caret moves to
+    /// it, centered in the viewport; the caret returns to `origin` when
+    /// the pattern matches nothing in the buffer.
     pub fn update_live_search(&mut self, pattern: &str, origin: Location) {
         self.search_pattern = Some(pattern.to_string());
-        if !self.find_first(pattern) {
-            self.set_location_and_scroll(origin);
+        match self.buffer.find_wrapping(pattern, origin) {
+            Some(location) => self.set_location_and_center(location),
+            None => self.set_location_and_scroll(origin),
         }
         self.modified = true;
+    }
+
+    /// Moves the caret to the next occurrence of the open live search
+    /// pattern — the first match after the current one — scanning forward
+    /// and wrapping to the top of the buffer, and scrolls it into view.
+    /// Does nothing while no search is open, the pattern is empty, or the
+    /// pattern matches nothing in the buffer.
+    pub fn search_next(&mut self) {
+        let pattern = match self.search_pattern.as_deref() {
+            Some(pattern) if !pattern.is_empty() => pattern,
+            _ => return,
+        };
+        // The match begins at the caret and spans one grapheme per
+        // pattern grapheme, so the next match starts after the match's
+        // end.
+        let start = Location {
+            x: self
+                .location
+                .x
+                .saturating_add(pattern.grapheme_indices(true).count()),
+            y: self.location.y,
+        };
+        if let Some(location) = self.buffer.find_wrapping(pattern, start) {
+            self.set_location_and_scroll(location);
+            // The highlight follows the caret, so a moved match needs a
+            // re-render even when the scroll did not change.
+            self.modified = true;
+        }
+    }
+
+    /// Moves the caret to the previous occurrence of the open live search
+    /// pattern — the last match ending before the current one — scanning
+    /// backwards and wrapping to the end of the buffer, and scrolls it
+    /// into view. Does nothing while no search is open, the pattern is
+    /// empty, or the pattern matches nothing in the buffer.
+    pub fn search_prev(&mut self) {
+        let pattern = match self.search_pattern.as_deref() {
+            Some(pattern) if !pattern.is_empty() => pattern,
+            _ => return,
+        };
+        if let Some(location) = self.buffer.find_wrapping_before(pattern, self.location) {
+            self.set_location_and_scroll(location);
+            // The highlight follows the caret, so a moved match needs a
+            // re-render even when the scroll did not change.
+            self.modified = true;
+        }
     }
 
     /// Clears the live search when the search prompt closes, so the buffer
@@ -503,15 +603,18 @@ impl View {
     /// The grapheme span of the live search match on its buffer row, while
     /// the search prompt is open and its pattern matches at the caret:
     /// `None` when no search is open, the pattern is empty, or the pattern
-    /// has no match (the caret then rests at the search origin, on no
-    /// match).
+    /// matches nothing in the buffer (the caret then rests at the search
+    /// origin, on no match).
+    ///
+    /// A match counts even when an earlier occurrence of the pattern
+    /// exists on the same line: the search may have started after it.
     fn live_search_highlight(&self) -> Option<(usize, Range<usize>)> {
         let pattern = self.search_pattern.as_deref()?;
         if pattern.is_empty() {
             return None;
         }
         let line = self.buffer.lines.get(self.location.y)?;
-        if line.find(pattern) != Some(self.location.x) {
+        if line.find_from(pattern, self.location.x) != Some(self.location.x) {
             return None;
         }
         let span = pattern.grapheme_indices(true).count();
@@ -762,11 +865,51 @@ mod tests {
     }
 
     #[test]
-    fn find_first_moves_the_caret_to_the_first_match_from_the_top() {
+    fn find_first_moves_the_caret_to_the_first_match_at_or_after_the_caret() {
         let mut view = make_view(&["alpha", "beta", "alpha"]);
         view.set_location(0, 1);
 
         assert!(view.find_first("alpha"));
+
+        assert_eq!((view.location.x, view.location.y), (0, 2));
+    }
+
+    #[test]
+    fn find_first_skips_matches_before_the_caret() {
+        let mut view = make_view(&["hello world hello"]);
+        view.set_location(6, 0);
+
+        assert!(view.find_first("hello"));
+
+        assert_eq!((view.location.x, view.location.y), (12, 0));
+    }
+
+    #[test]
+    fn find_first_finds_a_match_that_starts_at_the_caret() {
+        let mut view = make_view(&["abcabc"]);
+        view.set_location(3, 0);
+
+        assert!(view.find_first("abc"));
+
+        assert_eq!((view.location.x, view.location.y), (3, 0));
+    }
+
+    #[test]
+    fn find_from_the_middle_of_a_later_line_searches_forward_only() {
+        let mut view = make_view(&["abc", "xyz abc"]);
+        view.set_location(2, 1);
+
+        assert!(view.find_first("abc"));
+
+        assert_eq!((view.location.x, view.location.y), (4, 1));
+    }
+
+    #[test]
+    fn find_first_from_a_position_past_the_end_of_the_buffer_wraps_to_the_top() {
+        let mut view = make_view(&["abc"]);
+        view.set_location(0, 1); // the "one past the end" position
+
+        assert!(view.find_first("a"));
 
         assert_eq!((view.location.x, view.location.y), (0, 0));
     }
@@ -822,24 +965,110 @@ mod tests {
     }
 
     #[test]
-    fn find_first_scrolls_the_match_into_view_from_above() {
-        let mut view = view_with_lines(40);
+    fn find_first_centers_a_match_far_below_the_viewport() {
+        let mut view = view_with_lines(100);
 
-        view.find_first("line 30");
+        view.find_first("line 60");
 
-        // The pattern sits at the start of its line, and the match lands
-        // on the last visible row: scroll.row + height - 1.
-        assert_eq!((view.location.x, view.location.y), (0, 30));
-        assert_eq!(view.scroll_offset.row, 30 - 22 + 1);
+        assert_eq!((view.location.x, view.location.y), (0, 60));
+        // Row 60 lands at the middle of the 22-row viewport: 60 - 22 / 2.
+        assert_eq!(view.scroll_offset.row, 49);
     }
 
     #[test]
-    fn find_first_scrolls_the_match_into_view_from_below() {
+    fn find_first_centers_a_match_in_the_middle_of_the_document() {
+        let mut view = view_with_lines(40);
+
+        view.find_first("line 15");
+
+        assert_eq!((view.location.x, view.location.y), (0, 15));
+        // Row 15 lands at the middle of the 22-row viewport: 15 - 22 / 2.
+        assert_eq!(view.scroll_offset.row, 4);
+    }
+
+    #[test]
+    fn find_first_of_a_match_near_the_top_scrolls_to_the_top_not_past_it() {
+        let mut view = view_with_lines(40);
+
+        view.find_first("line 3");
+
+        assert_eq!((view.location.x, view.location.y), (0, 3));
+        // Row 3 - 22 / 2 would be negative: the viewport starts at row 0.
+        assert_eq!(view.scroll_offset.row, 0);
+    }
+
+    #[test]
+    fn find_first_scrolls_a_match_below_the_viewport_into_view() {
         let mut view = view_with_lines(40);
         view.set_location(0, 30);
         view.scroll_location_into_view();
         assert_eq!(view.scroll_offset.row, 9);
 
+        view.find_first("line 39");
+
+        // Centering wants row 39 - 22 / 2, but the document only scrolls
+        // to row 40 - 22.
+        assert_eq!((view.location.x, view.location.y), (0, 39));
+        assert_eq!(view.scroll_offset.row, 40 - 22);
+    }
+
+    #[test]
+    fn find_first_centers_the_match_at_the_middle_of_the_viewport_width() {
+        let line = format!("{}XYZ{}", "a".repeat(100), "a".repeat(97));
+        let mut view = make_view(&[&line]);
+        view.size = Size {
+            width: 80,
+            height: 22,
+        };
+
+        view.find_first("XYZ");
+
+        assert_eq!((view.location.x, view.location.y), (100, 0));
+        // The match's column sits at the middle of the 80-column
+        // viewport: 100 - 80 / 2.
+        assert_eq!(view.scroll_offset.col, 60);
+    }
+
+    #[test]
+    fn find_first_of_a_match_near_the_start_of_a_long_line_scrolls_to_column_zero() {
+        let line = format!("XYZ{}", "a".repeat(194));
+        let mut view = make_view(&[&line]);
+        view.size = Size {
+            width: 80,
+            height: 22,
+        };
+
+        view.find_first("XYZ");
+
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        assert_eq!(view.scroll_offset.col, 0);
+    }
+
+    #[test]
+    fn find_first_of_a_match_near_the_end_of_a_long_line_clamps_the_scroll() {
+        let line = format!("{}XYZ", "a".repeat(194));
+        let mut view = make_view(&[&line]);
+        view.size = Size {
+            width: 80,
+            height: 22,
+        };
+
+        view.find_first("XYZ");
+
+        assert_eq!((view.location.x, view.location.y), (194, 0));
+        // Centering would scroll past the end of the line: the viewport
+        // stops where the line ends.
+        assert_eq!(view.scroll_offset.col, 197 - 80);
+    }
+
+    #[test]
+    fn find_first_wraps_to_the_top_and_scrolls_the_match_into_view() {
+        let mut view = view_with_lines(40);
+        view.set_location(0, 30);
+        view.scroll_location_into_view();
+        assert_eq!(view.scroll_offset.row, 9);
+
+        // Nothing after row 30 matches, so the search wraps to the top.
         view.find_first("line 0");
 
         assert_eq!((view.location.x, view.location.y), (0, 0));
@@ -907,12 +1136,172 @@ mod tests {
     }
 
     #[test]
+    fn update_live_search_starts_from_the_origin_not_the_top() {
+        let mut view = make_view(&["foo cat foo bar"]);
+        view.set_location(8, 0);
+
+        // The first "foo" is before the origin: the match is the second one.
+        view.update_live_search("foo", Location { x: 8, y: 0 });
+
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+        assert_eq!(view.live_search_highlight(), Some((0, 8..11)));
+    }
+
+    #[test]
+    fn update_live_search_centers_the_match_in_the_viewport() {
+        let mut view = view_with_lines(40);
+        view.set_location(0, 0);
+
+        view.update_live_search("line 25", Location { x: 0, y: 0 });
+
+        assert_eq!((view.location.x, view.location.y), (0, 25));
+        // Row 25 lands at the middle of the 22-row viewport: 25 - 22 / 2.
+        assert_eq!(view.scroll_offset.row, 14);
+    }
+
+    #[test]
+    fn update_live_search_wraps_to_the_top_when_nothing_matches_after_the_origin() {
+        let mut view = make_view(&["foo cat foo bar"]);
+        view.set_location(15, 0);
+
+        // Nothing matches at or after the origin: the search wraps to the top.
+        view.update_live_search("foo", Location { x: 15, y: 0 });
+
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        assert_eq!(view.live_search_highlight(), Some((0, 0..3)));
+    }
+
+    #[test]
+    fn update_live_search_of_a_pattern_that_matches_nowhere_keeps_the_caret_at_the_origin() {
+        let mut view = make_view(&["foo cat foo bar"]);
+        view.set_location(15, 0);
+
+        // The pattern matches nothing in the buffer, so the caret stays there.
+        view.update_live_search("zzz", Location { x: 15, y: 0 });
+
+        assert_eq!((view.location.x, view.location.y), (15, 0));
+        assert_eq!(view.live_search_highlight(), None);
+        assert!(!view.live_search_has_match());
+    }
+
+    #[test]
+    fn search_next_moves_the_caret_to_the_next_match_after_the_current_one() {
+        let mut view = make_view(&["hello world hello"]);
+        view.update_live_search("hello", Location { x: 0, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        view.search_next();
+
+        assert_eq!((view.location.x, view.location.y), (12, 0));
+        assert_eq!(view.live_search_highlight(), Some((0, 12..17)));
+        // The highlight moved, so the view must re-render even though the
+        // scroll did not change.
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn search_next_wraps_to_the_top_when_no_match_follows_the_current_one() {
+        let mut view = make_view(&["hello world hello"]);
+        view.update_live_search("hello", Location { x: 12, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (12, 0));
+
+        view.search_next();
+
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn search_next_of_a_multibyte_pattern_steps_past_the_whole_match() {
+        // 'é' is two bytes in UTF-8 but one grapheme: "café" spans four
+        // graphemes, so the next match starts at grapheme 5.
+        let mut view = make_view(&["café café"]);
+        view.update_live_search("café", Location { x: 0, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        view.search_next();
+
+        assert_eq!((view.location.x, view.location.y), (5, 0));
+    }
+
+    #[test]
+    fn search_prev_moves_the_caret_to_the_previous_match_before_the_current_one() {
+        let mut view = make_view(&["hello world hello"]);
+        view.update_live_search("hello", Location { x: 12, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (12, 0));
+
+        view.search_prev();
+
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        assert_eq!(view.live_search_highlight(), Some((0, 0..5)));
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn search_prev_wraps_to_the_end_when_no_match_precedes_the_current_one() {
+        let mut view = make_view(&["hello world hello"]);
+        view.update_live_search("hello", Location { x: 0, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        view.search_prev();
+
+        assert_eq!((view.location.x, view.location.y), (12, 0));
+    }
+
+    #[test]
+    fn search_next_and_search_prev_step_between_matches_across_lines() {
+        let mut view = make_view(&["abc", "xyz abc"]);
+        view.update_live_search("abc", Location { x: 4, y: 1 });
+        assert_eq!((view.location.x, view.location.y), (4, 1));
+
+        view.search_prev();
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        view.search_next();
+        assert_eq!((view.location.x, view.location.y), (4, 1));
+    }
+
+    #[test]
+    fn search_next_and_search_prev_without_a_match_keep_the_caret_where_it_is() {
+        let mut view = make_view(&["abc"]);
+        view.update_live_search("zzz", Location { x: 1, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+
+        view.search_next();
+        view.search_prev();
+
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn search_next_and_search_prev_without_an_open_search_do_nothing() {
+        let mut view = make_view(&["abc abc"]);
+        view.set_location(0, 0);
+
+        view.search_next();
+        view.search_prev();
+
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
     fn live_search_highlight_is_none_when_the_caret_is_not_on_a_match() {
         let mut view = make_view(&["alpha beta"]);
         view.search_pattern = Some(String::from("alpha"));
         view.set_location(7, 0); // on "beta", not on the match
 
         assert_eq!(view.live_search_highlight(), None);
+    }
+
+    #[test]
+    fn live_search_highlight_counts_a_match_at_the_caret_after_an_earlier_occurrence() {
+        let mut view = make_view(&["abc abc"]);
+        view.set_location(2, 0);
+
+        // The first "abc" is before the origin, so the match is the second one.
+        view.update_live_search("abc", Location { x: 2, y: 0 });
+
+        assert_eq!((view.location.x, view.location.y), (4, 0));
+        assert_eq!(view.live_search_highlight(), Some((0, 4..7)));
     }
 
     #[test]
@@ -924,6 +1313,29 @@ mod tests {
         view.clear_live_search();
 
         assert_eq!(view.live_search_highlight(), None);
+        assert!(view.modified);
+    }
+
+    #[test]
+    fn clearing_the_live_search_and_restoring_the_caret_keeps_the_view_dirty() {
+        let mut view = make_view(&["ab"]);
+        view.set_location(0, 0);
+
+        // The live search finds "b" and marks the view dirty; a render
+        // pass then consumes the flag, so the highlight is on screen.
+        view.update_live_search("b", Location { x: 0, y: 0 });
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+        assert!(view.modified);
+        view.modified = false;
+
+        // Dismissing the search: clear the highlight, then restore the
+        // caret where the search began — without a scroll change in
+        // between.
+        view.clear_live_search();
+        view.set_location_and_scroll(Location { x: 0, y: 0 });
+
+        // The view must stay dirty, or the last rendered frame still
+        // shows the highlighted match.
         assert!(view.modified);
     }
 

@@ -17,17 +17,75 @@ impl Buffer {
         self.lines.is_empty()
     }
 
-    /// The location of the first occurrence of `pattern`, scanning the
-    /// lines from the top of the buffer: `None` when no line contains the
-    /// pattern. An empty pattern is not a search and matches nothing.
-    pub fn find(&self, pattern: &str) -> Option<Location> {
+    /// The location of the first occurrence of `pattern` at or after
+    /// `start`, scanning the lines from there onward: the line of `start`
+    /// from `start.x`, then each following line from its beginning.
+    /// `None` when no line contains the pattern there. An empty pattern
+    /// is not a search and matches nothing.
+    pub fn find_from(&self, pattern: &str, start: Location) -> Option<Location> {
         if pattern.is_empty() {
             return None;
+        }
+        let start_y = start.y.min(self.lines.len());
+        if let Some(x) = self.lines.get(start_y)?.find_from(pattern, start.x) {
+            return Some(Location { x, y: start_y });
         }
         self.lines
             .iter()
             .enumerate()
+            .skip(start_y.saturating_add(1))
             .find_map(|(y, line)| line.find(pattern).map(|x| Location { x, y }))
+    }
+
+    /// The location of the first occurrence of `pattern` at or after
+    /// `start`, scanning forward from there; when nothing matches after
+    /// `start`, the search wraps to the top of the buffer and scans
+    /// forward from there, so the match — if any — sits before `start`.
+    /// `None` only when no line contains the pattern at all. An empty
+    /// pattern is not a search and matches nothing.
+    pub fn find_wrapping(&self, pattern: &str, start: Location) -> Option<Location> {
+        if let Some(location) = self.find_from(pattern, start) {
+            return Some(location);
+        }
+        self.find_from(pattern, Location::default())
+    }
+
+    /// The location of the last occurrence of `pattern` ending at or
+    /// before `before`, scanning the lines backwards from there: the
+    /// line of `before` up to `before.x`, then each preceding line, its
+    /// last occurrence. `None` when no line contains the pattern before
+    /// `before`. An empty pattern is not a search and matches nothing.
+    pub fn find_before(&self, pattern: &str, before: Location) -> Option<Location> {
+        if pattern.is_empty() {
+            return None;
+        }
+        let before_y = before.y.min(self.lines.len());
+        if before_y < self.lines.len()
+            && let Some(x) = self.lines[before_y].rfind_before(pattern, before.x)
+        {
+            return Some(Location { x, y: before_y });
+        }
+        (0..before_y)
+            .rev()
+            .find_map(|y| self.lines[y].rfind(pattern).map(|x| Location { x, y }))
+    }
+
+    /// The location of the last occurrence of `pattern` ending at or
+    /// before `before`, scanning the lines backwards from there; when
+    /// nothing matches before `before`, the search wraps to the end of
+    /// the buffer and scans backwards from there, so the match — if any —
+    /// sits after `before`. `None` only when no line contains the pattern
+    /// at all. An empty pattern is not a search and matches nothing.
+    pub fn find_wrapping_before(&self, pattern: &str, before: Location) -> Option<Location> {
+        if pattern.is_empty() {
+            return None;
+        }
+        if let Some(location) = self.find_before(pattern, before) {
+            return Some(location);
+        }
+        (0..self.lines.len())
+            .rev()
+            .find_map(|y| self.lines[y].rfind(pattern).map(|x| Location { x, y }))
     }
 
     /// Reads the file at `file_path` into a new buffer.
@@ -474,55 +532,312 @@ mod tests {
     }
 
     #[test]
-    fn find_returns_the_first_match_from_the_top() {
+    fn find_from_returns_the_first_match_at_or_after_the_start() {
         let buf = make_buffer(&["alpha", "beta", "alpha"]);
 
-        assert_eq!(buf.find("alpha"), Some(Location { x: 0, y: 0 }));
-        assert_eq!(buf.find("beta"), Some(Location { x: 0, y: 1 }));
+        assert_eq!(
+            buf.find_from("alpha", Location { x: 0, y: 0 }),
+            Some(Location { x: 0, y: 0 })
+        );
+        assert_eq!(
+            buf.find_from("beta", Location { x: 0, y: 1 }),
+            Some(Location { x: 0, y: 1 })
+        );
     }
 
     #[test]
-    fn find_reports_the_grapheme_column_of_the_match() {
+    fn find_from_skips_matches_before_the_start_position() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        assert_eq!(
+            buf.find_from("hello", Location { x: 6, y: 0 }),
+            Some(Location { x: 12, y: 0 })
+        );
+        // The only "world" starts at column 6, before the start position.
+        assert_eq!(buf.find_from("world", Location { x: 7, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_from_finds_a_match_that_starts_exactly_at_the_start_position() {
+        let buf = make_buffer(&["abcabc"]);
+
+        assert_eq!(
+            buf.find_from("abc", Location { x: 3, y: 0 }),
+            Some(Location { x: 3, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_from_on_a_later_line_skips_the_lines_before_it() {
+        let buf = make_buffer(&["abc", "xyz", "abc"]);
+
+        assert_eq!(
+            buf.find_from("abc", Location { x: 1, y: 1 }),
+            Some(Location { x: 0, y: 2 })
+        );
+    }
+
+    #[test]
+    fn find_from_at_a_position_past_the_end_of_the_buffer_is_none() {
+        let buf = make_buffer(&["abc"]);
+
+        // Row 1 is the "one past the end" position.
+        assert_eq!(buf.find_from("a", Location { x: 0, y: 1 }), None);
+    }
+
+    #[test]
+    fn find_from_reports_the_grapheme_column_of_the_match() {
         let buf = make_buffer(&["hello world"]);
 
-        assert_eq!(buf.find("world"), Some(Location { x: 6, y: 0 }));
+        assert_eq!(
+            buf.find_from("world", Location { x: 0, y: 0 }),
+            Some(Location { x: 6, y: 0 })
+        );
     }
 
     #[test]
-    fn find_of_a_multibyte_pattern_counts_graphemes_not_bytes() {
+    fn find_from_of_a_multibyte_pattern_counts_graphemes_not_bytes() {
         // 'é' is two bytes in UTF-8 but one grapheme, so "latte" starts at
         // grapheme 5 of "café latte".
         let buf = make_buffer(&["café latte"]);
 
-        assert_eq!(buf.find("latte"), Some(Location { x: 5, y: 0 }));
+        assert_eq!(
+            buf.find_from("latte", Location { x: 0, y: 0 }),
+            Some(Location { x: 5, y: 0 })
+        );
     }
 
     #[test]
-    fn find_on_lines_with_tabs_counts_tabs_as_graphemes() {
+    fn find_from_on_lines_with_tabs_counts_tabs_as_graphemes() {
         let buf = make_buffer(&["a\tb c"]);
 
-        assert_eq!(buf.find("c"), Some(Location { x: 4, y: 0 }));
+        assert_eq!(
+            buf.find_from("c", Location { x: 0, y: 0 }),
+            Some(Location { x: 4, y: 0 })
+        );
     }
 
     #[test]
-    fn find_without_a_match_is_none() {
+    fn find_from_without_a_match_is_none() {
         let buf = make_buffer(&["abc", "def"]);
 
-        assert_eq!(buf.find("z"), None);
+        assert_eq!(buf.find_from("z", Location { x: 0, y: 0 }), None);
     }
 
     #[test]
-    fn find_of_an_empty_pattern_is_none() {
+    fn find_from_of_an_empty_pattern_is_none() {
         let buf = make_buffer(&["abc"]);
 
-        assert_eq!(buf.find(""), None);
+        assert_eq!(buf.find_from("", Location { x: 0, y: 0 }), None);
     }
 
     #[test]
-    fn find_on_an_empty_buffer_is_none() {
+    fn find_from_on_an_empty_buffer_is_none() {
         let buf = Buffer::default();
 
-        assert_eq!(buf.find("a"), None);
+        assert_eq!(buf.find_from("a", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_prefers_the_match_after_the_start_position() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        // The forward match at 12 wins over the wrapped one at 0.
+        assert_eq!(
+            buf.find_wrapping("hello", Location { x: 6, y: 0 }),
+            Some(Location { x: 12, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_finds_a_match_that_starts_exactly_at_the_start_position() {
+        let buf = make_buffer(&["abcabc"]);
+
+        assert_eq!(
+            buf.find_wrapping("abc", Location { x: 3, y: 0 }),
+            Some(Location { x: 3, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_wraps_to_the_top_when_nothing_matches_after_the_start() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        // After column 13 only "ello" remains, so the search wraps.
+        assert_eq!(
+            buf.find_wrapping("hello", Location { x: 13, y: 0 }),
+            Some(Location { x: 0, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_from_a_later_line_wraps_to_an_earlier_line() {
+        let buf = make_buffer(&["abc", "xyz", "abc"]);
+
+        assert_eq!(
+            buf.find_wrapping("abc", Location { x: 1, y: 2 }),
+            Some(Location { x: 0, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_from_a_position_past_the_end_of_the_buffer_wraps_to_the_top() {
+        let buf = make_buffer(&["abc"]);
+
+        // Row 1 is the "one past the end" position.
+        assert_eq!(
+            buf.find_wrapping("a", Location { x: 0, y: 1 }),
+            Some(Location { x: 0, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_of_a_pattern_that_matches_nowhere_is_none() {
+        let buf = make_buffer(&["abc", "def"]);
+
+        assert_eq!(buf.find_wrapping("z", Location { x: 1, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_of_an_empty_pattern_is_none() {
+        let buf = make_buffer(&["abc"]);
+
+        assert_eq!(buf.find_wrapping("", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_on_an_empty_buffer_is_none() {
+        let buf = Buffer::default();
+
+        assert_eq!(buf.find_wrapping("a", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_before_returns_the_last_match_ending_at_or_before_the_position() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        // The last "hello" ends at column 17, past the position.
+        assert_eq!(
+            buf.find_before("hello", Location { x: 16, y: 0 }),
+            Some(Location { x: 0, y: 0 })
+        );
+        // A match ending exactly at the position counts.
+        assert_eq!(
+            buf.find_before("hello", Location { x: 17, y: 0 }),
+            Some(Location { x: 12, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_before_scans_the_preceding_lines_backwards() {
+        let buf = make_buffer(&["hello world hello", "hello again"]);
+
+        // Nothing on line 1 before column 2; the last match of line 0
+        // is the closest one before the position.
+        assert_eq!(
+            buf.find_before("hello", Location { x: 2, y: 1 }),
+            Some(Location { x: 12, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_before_at_the_top_of_the_buffer_is_none() {
+        let buf = make_buffer(&["hello", "hello"]);
+
+        assert_eq!(buf.find_before("hello", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_before_of_a_position_past_the_end_of_the_buffer_is_the_last_match() {
+        let buf = make_buffer(&["hello", "world hello"]);
+
+        // Row 2 is the "one past the end" position: every match sits
+        // before it, so the buffer's last occurrence wins.
+        assert_eq!(
+            buf.find_before("hello", Location { x: 0, y: 2 }),
+            Some(Location { x: 6, y: 1 })
+        );
+    }
+
+    #[test]
+    fn find_before_of_a_multibyte_pattern_counts_graphemes_not_bytes() {
+        // 'é' is two bytes in UTF-8, so the second "café" starts at
+        // grapheme 5 of "café café".
+        let buf = make_buffer(&["café café"]);
+
+        assert_eq!(
+            buf.find_before("café", Location { x: 9, y: 0 }),
+            Some(Location { x: 5, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_before_of_an_empty_pattern_is_none() {
+        let buf = make_buffer(&["abc"]);
+
+        assert_eq!(buf.find_before("", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_before_without_a_match_is_none() {
+        let buf = make_buffer(&["abc", "def"]);
+
+        assert_eq!(buf.find_before("z", Location { x: 0, y: 1 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_before_prefers_the_match_before_the_position() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        // The match at 0 sits before the position; the one at 12 sits
+        // after it and is only reachable by wrapping.
+        assert_eq!(
+            buf.find_wrapping_before("hello", Location { x: 14, y: 0 }),
+            Some(Location { x: 0, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_before_wraps_to_the_end_when_nothing_matches_before() {
+        let buf = make_buffer(&["hello world hello"]);
+
+        assert_eq!(
+            buf.find_wrapping_before("hello", Location { x: 2, y: 0 }),
+            Some(Location { x: 12, y: 0 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_before_wraps_to_the_end_of_a_later_line() {
+        let buf = make_buffer(&["xyz", "abc"]);
+
+        // Nothing matches before the position on any line: the search
+        // wraps to the end of the buffer.
+        assert_eq!(
+            buf.find_wrapping_before("abc", Location { x: 0, y: 0 }),
+            Some(Location { x: 0, y: 1 })
+        );
+    }
+
+    #[test]
+    fn find_wrapping_before_of_a_pattern_that_matches_nowhere_is_none() {
+        let buf = make_buffer(&["abc", "def"]);
+
+        assert_eq!(buf.find_wrapping_before("z", Location { x: 1, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_before_of_an_empty_pattern_is_none() {
+        let buf = make_buffer(&["abc"]);
+
+        assert_eq!(buf.find_wrapping_before("", Location { x: 0, y: 0 }), None);
+    }
+
+    #[test]
+    fn find_wrapping_before_on_an_empty_buffer_is_none() {
+        let buf = Buffer::default();
+
+        assert_eq!(buf.find_wrapping_before("a", Location { x: 0, y: 0 }), None);
     }
 
     #[test]

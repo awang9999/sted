@@ -132,7 +132,10 @@ impl Editor {
                 EditorCommand::Find => {
                     // Collect the pattern to search for on the command bar;
                     // while the prompt is open, the view tracks the first
-                    // match from the top of the buffer.
+                    // match from the current caret position onwards,
+                    // wrapping to the top of the buffer when nothing
+                    // matches after it, and the arrow keys navigate
+                    // between matches.
                     self.open_prompt(PromptPurpose::Find);
                 }
                 _ => self.view.handle_command(command),
@@ -420,12 +423,72 @@ mod tests {
         let mut editor = Editor::default();
         editor.view.handle_command(EditorCommand::Insert('a'));
         editor.view.handle_command(EditorCommand::Insert('b'));
+        // The search starts at the top of the buffer.
+        editor.view.set_location(0, 0);
 
         editor.evaluate_event(ctrl_f());
         editor.evaluate_event(key('b'));
 
         assert!(editor.prompt.is_some());
         assert_eq!((editor.view.location.x, editor.view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn the_search_starts_from_the_caret_position_not_the_top() {
+        let mut editor = Editor::default();
+        for c in "foo cat foo bar".chars() {
+            editor.view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits on the second "foo".
+        editor.view.set_location(8, 0);
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('f'));
+
+        assert!(editor.prompt.is_some());
+        // The first "foo" is before the caret, so the match is the second one.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (8, 0));
+    }
+
+    #[test]
+    fn the_search_wraps_to_the_top_when_nothing_matches_after_the_caret() {
+        let mut editor = Editor::default();
+        for c in "foo cat foo bar".chars() {
+            editor.view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits at the end of the buffer.
+        editor.view.set_location(15, 0);
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('f'));
+
+        assert!(editor.prompt.is_some());
+        // Nothing after the caret matches, so the search wraps to the top.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn arrows_in_the_search_prompt_navigate_between_matches() {
+        let mut editor = Editor::default();
+        for c in "foo cat foo bar".chars() {
+            editor.view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits at the top of the buffer.
+        editor.view.set_location(0, 0);
+
+        editor.evaluate_event(ctrl_f());
+        editor.evaluate_event(key('f'));
+        // The first match is at the top.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (0, 0));
+
+        editor.evaluate_event(press(KeyCode::Right));
+        assert_eq!((editor.view.location.x, editor.view.location.y), (8, 0));
+        editor.evaluate_event(press(KeyCode::Down));
+        // Only two "f" matches: the next step wraps to the first.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (0, 0));
+        editor.evaluate_event(press(KeyCode::Left));
+        // Backwards wraps to the end of the buffer.
+        assert_eq!((editor.view.location.x, editor.view.location.y), (8, 0));
     }
 
     #[test]
@@ -446,19 +509,19 @@ mod tests {
     #[test]
     fn a_pattern_that_stops_matching_returns_the_caret_to_where_the_search_started() {
         let mut editor = Editor::default();
-        for c in "file".chars() {
+        for c in "file is file".chars() {
             editor.view.handle_command(EditorCommand::Insert(c));
         }
-        // The caret sits after "file".
-        assert_eq!((editor.view.location.x, editor.view.location.y), (4, 0));
+        // The caret sits after the first "file".
+        editor.view.set_location(4, 0);
 
         editor.evaluate_event(ctrl_f());
         for c in "filo".chars() {
             editor.evaluate_event(key(c));
         }
 
-        // "filo" does not occur: the caret is back after "file", not
-        // sitting on the word its prefixes matched.
+        // "filo" does not occur after the caret: the caret is back after
+        // the first "file", not sitting on the word its prefixes matched.
         assert!(editor.prompt.is_some());
         assert_eq!((editor.view.location.x, editor.view.location.y), (4, 0));
     }
@@ -468,6 +531,8 @@ mod tests {
         let mut editor = Editor::default();
         editor.view.handle_command(EditorCommand::Insert('a'));
         editor.view.handle_command(EditorCommand::Insert('b'));
+        // The search starts at the top of the buffer.
+        editor.view.set_location(0, 0);
 
         editor.evaluate_event(ctrl_f());
         editor.evaluate_event(key('b'));
@@ -495,9 +560,10 @@ mod tests {
         let mut editor = Editor::default();
         editor.view.handle_command(EditorCommand::Insert('a'));
         editor.view.handle_command(EditorCommand::Insert('b'));
+        editor.view.set_location(0, 0);
 
         editor.evaluate_event(ctrl_f());
-        editor.evaluate_event(key('a')); // the live search moves the caret to (0, 0)
+        editor.evaluate_event(key('b')); // the live search moves the caret to (1, 0)
         editor.evaluate_event(press(KeyCode::Esc));
 
         assert!(editor.prompt.is_none());
@@ -505,7 +571,7 @@ mod tests {
         assert_eq!(message.message, "Search aborted");
         assert_eq!(message.duration, LONG_MESSAGE_DURATION);
         // The caret is back where it was when the search opened.
-        assert_eq!((editor.view.location.x, editor.view.location.y), (2, 0));
+        assert_eq!((editor.view.location.x, editor.view.location.y), (0, 0));
     }
 
     #[test]

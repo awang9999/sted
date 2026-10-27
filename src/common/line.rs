@@ -154,13 +154,46 @@ impl Line {
 
     /// The grapheme index of the first occurrence of `pattern` in the
     /// line's text, or `None` when the line does not contain it.
-    ///
-    /// The pattern is located byte-wise with [`str::find`] and its byte
-    /// index is translated to the grapheme it falls in, so a match that
-    /// starts inside a grapheme cluster reports that cluster. The empty
-    /// pattern matches at the start of the line.
     pub fn find(&self, pattern: &str) -> Option<usize> {
-        let byte_index = self.text.find(pattern)?;
+        self.find_from(pattern, 0)
+    }
+
+    /// The grapheme index of the first occurrence of `pattern` at or
+    /// after `grapheme_index`, or `None` when the line does not contain
+    /// it there.
+    ///
+    /// Finding from a position is finding in the slice of the line's text
+    /// that starts at that position: the pattern is located byte-wise
+    /// with [`str::find`] in the slice and its slice-relative byte index
+    /// is translated to the grapheme it falls in, so a match that starts
+    /// inside a grapheme cluster reports that cluster. Positions past the
+    /// end of the line yield `None`. The empty pattern matches at
+    /// `grapheme_index`.
+    pub fn find_from(&self, pattern: &str, grapheme_index: usize) -> Option<usize> {
+        let start = self.byte_index_at(grapheme_index);
+        let byte_index = self.text[start..].find(pattern)?;
+        Some(self.grapheme_index_at_byte(start.saturating_add(byte_index)))
+    }
+
+    /// The grapheme index of the last occurrence of `pattern` in the
+    /// line's text, or `None` when the line does not contain it.
+    pub fn rfind(&self, pattern: &str) -> Option<usize> {
+        self.rfind_before(pattern, self.grapheme_count())
+    }
+
+    /// The grapheme index of the last occurrence of `pattern` that ends
+    /// at or before `grapheme_index`, or `None` when the line does not
+    /// contain it there.
+    ///
+    /// The backwards counterpart of [`Line::find_from`]: finding backwards
+    /// from a position is finding in the slice of the line's text that
+    /// ends at that position: the pattern is located byte-wise with
+    /// [`str::rfind`] in the slice and its byte index is translated to the
+    /// grapheme it falls in. Positions past the end of the line yield the
+    /// line's last occurrence.
+    pub fn rfind_before(&self, pattern: &str, grapheme_index: usize) -> Option<usize> {
+        let end = self.byte_index_at(grapheme_index);
+        let byte_index = self.text[..end].rfind(pattern)?;
         Some(self.grapheme_index_at_byte(byte_index))
     }
 
@@ -817,6 +850,83 @@ mod tests {
     fn find_of_an_empty_pattern_matches_at_the_start_of_the_line() {
         assert_eq!(Line::from("abc").find(""), Some(0));
         assert_eq!(Line::from("").find(""), Some(0));
+    }
+
+    #[test]
+    fn find_from_skips_matches_before_the_position() {
+        let line = Line::from("hello world");
+        assert_eq!(line.find_from("hello", 1), None);
+        assert_eq!(line.find_from("world", 6), Some(6));
+        // The 'o's at 4 and 5 are before the position.
+        assert_eq!(line.find_from("o", 6), Some(7));
+    }
+
+    #[test]
+    fn find_from_finds_a_match_that_starts_at_the_position() {
+        let line = Line::from("hello world");
+        assert_eq!(line.find_from("lo world", 3), Some(3));
+        assert_eq!(line.find_from("o", 4), Some(4));
+    }
+
+    #[test]
+    fn find_from_past_the_end_of_the_line_is_none() {
+        let line = Line::from("abc");
+        assert_eq!(line.find_from("abc", 1), None);
+        assert_eq!(line.find_from("bc", 2), None);
+        assert_eq!(line.find_from("c", 3), None);
+    }
+
+    #[test]
+    fn find_from_of_zero_is_the_plain_find() {
+        let line = Line::from("café latte");
+        assert_eq!(line.find_from("latte", 0), line.find("latte"));
+        assert_eq!(line.find_from("é", 0), line.find("é"));
+        assert_eq!(line.find_from("zzz", 0), line.find("zzz"));
+    }
+
+    #[test]
+    fn rfind_returns_the_grapheme_index_of_the_last_match() {
+        let line = Line::from("hello world hello");
+        assert_eq!(line.rfind("hello"), Some(12));
+        assert_eq!(line.rfind("world"), Some(6));
+        assert_eq!(line.rfind("o"), Some(16));
+    }
+
+    #[test]
+    fn rfind_of_a_multibyte_pattern_translates_the_byte_index() {
+        // 'é' is two bytes in UTF-8, so the last "café" of "café café"
+        // starts at grapheme 5, byte 6.
+        let line = Line::from("café café");
+        assert_eq!(line.rfind("café"), Some(5));
+        assert_eq!(line.rfind("é"), Some(8));
+    }
+
+    #[test]
+    fn rfind_without_a_match_is_none() {
+        let line = Line::from("abc");
+        assert_eq!(line.rfind("d"), None);
+    }
+
+    #[test]
+    fn rfind_before_skips_matches_that_end_after_the_position() {
+        let line = Line::from("hello world hello");
+        // The last "hello" ends at column 17, past the position.
+        assert_eq!(line.rfind_before("hello", 16), Some(0));
+        // A match ending exactly at the position counts.
+        assert_eq!(line.rfind_before("hello", 17), Some(12));
+        // Nothing before the start.
+        assert_eq!(line.rfind_before("hello", 0), None);
+    }
+
+    #[test]
+    fn rfind_before_past_the_end_of_the_line_is_the_plain_rfind() {
+        let line = Line::from("café latte");
+        assert_eq!(
+            line.rfind_before("latte", line.grapheme_count()),
+            line.rfind("latte")
+        );
+        assert_eq!(line.rfind_before("latte", 100), line.rfind("latte"));
+        assert_eq!(line.rfind_before("zzz", 100), line.rfind("zzz"));
     }
 
     #[test]

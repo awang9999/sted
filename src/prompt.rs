@@ -1,14 +1,14 @@
 use crate::commandbar::{CommandBar, CommandBarOutcome};
 use crate::common::constants::LONG_MESSAGE_DURATION;
 use crate::common::types::Location;
-use crate::editorcommand::EditorCommand;
+use crate::editorcommand::{Direction, EditorCommand};
 use crate::terminal::Position;
 use crate::view::View;
 
 /// The prompt text of the save-as prompt.
 const SAVE_AS_PROMPT: &str = "Save as: ";
 /// The prompt text of the search prompt.
-const SEARCH_PROMPT: &str = "Search (Esc to cancel): ";
+const SEARCH_PROMPT: &str = "Search (Esc to cancel, Arrows to navigate): ";
 /// Shown on the command bar right of the typed pattern while a search
 /// matches nothing in the buffer.
 const NO_MATCHES: &str = "(No matches)";
@@ -120,14 +120,36 @@ impl PromptSession {
     /// closed, or `None` while it stays open.
     ///
     /// While a find prompt is open, every change to the typed pattern
-    /// re-runs the live search: the caret tracks the first match from the
-    /// top of the buffer and the view highlights the match, while the
-    /// caret returns to where the search began when the pattern stops
-    /// matching. Caret movement inside the prompt keeps the current match.
+    /// re-runs the live search: the caret tracks the first match from
+    /// where the search began onwards, wrapping to the top of the buffer
+    /// when nothing matches after it, and the view highlights the match,
+    /// centered in the viewport, while the caret returns to where the
+    /// search began when the pattern matches nothing in the buffer. The
+    /// arrow keys do not move the caret in the pattern but navigate
+    /// between matches instead: right and down find the next match after
+    /// the current one, left and up the previous one, both wrapping
+    /// around the buffer. Any other caret movement inside the prompt
+    /// keeps the current match.
     pub fn handle(&mut self, view: &mut View, command: EditorCommand) -> Option<PromptResolution> {
         // The viewport resizes together with the prompt.
         if let EditorCommand::Resize(size) = command {
             view.resize(size);
+        }
+
+        // While the find prompt is open, the arrow keys navigate between
+        // matches instead of moving the caret in the typed pattern.
+        if self.purpose == PromptPurpose::Find {
+            match command {
+                EditorCommand::Move(Direction::Right | Direction::Down) => {
+                    view.search_next();
+                    return None;
+                }
+                EditorCommand::Move(Direction::Left | Direction::Up) => {
+                    view.search_prev();
+                    return None;
+                }
+                _ => {}
+            }
         }
 
         // The live search re-runs only when the typed pattern changes.
@@ -205,7 +227,6 @@ impl PromptSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editorcommand::Direction;
     use crate::terminal::Size;
 
     fn view() -> View {
@@ -228,7 +249,8 @@ mod tests {
         let view = view();
         let session = PromptSession::open(&view, PromptPurpose::Find);
         assert!(session.bar().is_empty());
-        // The caret sits right behind the "Search (Esc to cancel): " prompt.
+        // The caret sits right behind the
+        // "Search (Esc to cancel, Arrows to navigate): " prompt.
         assert_eq!(session.bar().get_caret_position().col, SEARCH_PROMPT.len());
         assert_eq!(session.bar().get_caret_position().row, 23);
     }
@@ -238,6 +260,8 @@ mod tests {
         let mut view = view();
         view.handle_command(EditorCommand::Insert('a'));
         view.handle_command(EditorCommand::Insert('b'));
+        // The search starts at the top of the buffer.
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
         session.handle(&mut view, EditorCommand::Insert('b'));
         // The live search already moved the caret to the match while the
@@ -257,6 +281,8 @@ mod tests {
         for c in "foo cat foo bar".chars() {
             view.handle_command(EditorCommand::Insert(c));
         }
+        // The search starts at the top of the buffer.
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
         session.handle(&mut view, EditorCommand::Insert('f'));
@@ -268,6 +294,26 @@ mod tests {
         session.handle(&mut view, EditorCommand::Insert(' '));
         assert_eq!((view.location.x, view.location.y), (0, 0));
         session.handle(&mut view, EditorCommand::Insert('b'));
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+    }
+
+    #[test]
+    fn the_search_starts_from_the_caret_position_not_the_top() {
+        let mut view = view();
+        for c in "foo cat foo bar".chars() {
+            view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits on the second "foo".
+        view.set_location(8, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        // The first "foo" is before the caret, so "f" matches the second one.
+        session.handle(&mut view, EditorCommand::Insert('f'));
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+        for c in "oo b".chars() {
+            session.handle(&mut view, EditorCommand::Insert(c));
+        }
+        // "foo b" occurs only after the caret.
         assert_eq!((view.location.x, view.location.y), (8, 0));
     }
 
@@ -303,27 +349,27 @@ mod tests {
     #[test]
     fn a_pattern_that_stops_matching_returns_the_caret_to_the_search_origin() {
         let mut view = view();
-        for c in "file is here".chars() {
+        for c in "file is file".chars() {
             view.handle_command(EditorCommand::Insert(c));
         }
-        // The search starts with the caret past "file".
-        view.set_location(10, 0);
+        // The search starts with the caret after the first "file".
+        view.set_location(4, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
         for c in "fil".chars() {
             session.handle(&mut view, EditorCommand::Insert(c));
         }
-        // Each prefix of "filo" matches inside "file".
-        assert_eq!((view.location.x, view.location.y), (0, 0));
+        // Each prefix of "filo" matches the second "file".
+        assert_eq!((view.location.x, view.location.y), (8, 0));
 
         // "filo" matches nothing: the caret returns where the search
         // began instead of sitting on "file".
         session.handle(&mut view, EditorCommand::Insert('o'));
-        assert_eq!((view.location.x, view.location.y), (10, 0));
+        assert_eq!((view.location.x, view.location.y), (4, 0));
 
         // Backspacing to a matching pattern finds the match again.
         session.handle(&mut view, EditorCommand::BackSpace);
-        assert_eq!((view.location.x, view.location.y), (0, 0));
+        assert_eq!((view.location.x, view.location.y), (8, 0));
     }
 
     #[test]
@@ -345,14 +391,84 @@ mod tests {
         let mut view = view();
         view.handle_command(EditorCommand::Insert('a'));
         view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
         session.handle(&mut view, EditorCommand::Insert('b'));
-        session.handle(&mut view, EditorCommand::Move(Direction::Left));
+        // Home moves the caret in the pattern, not between matches.
+        session.handle(&mut view, EditorCommand::Move(Direction::Home));
 
         // The pattern did not change, so neither did the match.
         assert_eq!(view.live_search_pattern(), Some("b"));
         assert_eq!((view.location.x, view.location.y), (1, 0));
+    }
+
+    #[test]
+    fn right_and_down_find_the_next_match_while_the_search_prompt_is_open() {
+        let mut view = view();
+        for c in "foo cat foo bar".chars() {
+            view.handle_command(EditorCommand::Insert(c));
+        }
+        view.set_location(0, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+        session.handle(&mut view, EditorCommand::Insert('f'));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+
+        session.handle(&mut view, EditorCommand::Move(Direction::Right));
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+        // The arrow moved the match, not the caret in the pattern.
+        assert_eq!(
+            session.bar().get_caret_position().col,
+            SEARCH_PROMPT.len() + 1
+        );
+        session.handle(&mut view, EditorCommand::Move(Direction::Down));
+        // Only two "f" matches: the next step wraps to the first.
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+    }
+
+    #[test]
+    fn left_and_up_find_the_previous_match_while_the_search_prompt_is_open() {
+        let mut view = view();
+        for c in "foo cat foo bar".chars() {
+            view.handle_command(EditorCommand::Insert(c));
+        }
+        // The caret sits on the second "foo".
+        view.set_location(8, 0);
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+        session.handle(&mut view, EditorCommand::Insert('f'));
+        // The search starts at the caret: the match is the second "foo".
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+
+        session.handle(&mut view, EditorCommand::Move(Direction::Left));
+        assert_eq!((view.location.x, view.location.y), (0, 0));
+        session.handle(&mut view, EditorCommand::Move(Direction::Up));
+        // Only two "f" matches: the next step wraps to the last one.
+        assert_eq!((view.location.x, view.location.y), (8, 0));
+    }
+
+    #[test]
+    fn arrows_without_a_match_do_not_move_the_caret() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        session.handle(&mut view, EditorCommand::Insert('z'));
+        session.handle(&mut view, EditorCommand::Move(Direction::Right));
+        session.handle(&mut view, EditorCommand::Move(Direction::Left));
+
+        assert_eq!((view.location.x, view.location.y), (2, 0));
+    }
+
+    #[test]
+    fn arrows_still_move_the_caret_in_the_save_prompt() {
+        let mut view = view();
+        let mut session = PromptSession::open(&view, PromptPurpose::SaveAs);
+
+        session.handle(&mut view, EditorCommand::Insert('a'));
+        session.handle(&mut view, EditorCommand::Move(Direction::Left));
+
+        assert_eq!(session.bar().get_caret_position().col, SAVE_AS_PROMPT.len());
     }
 
     #[test]
@@ -404,10 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn a_find_pattern_that_wraps_to_a_match_before_the_origin_has_no_note() {
+        let mut view = view();
+        view.handle_command(EditorCommand::Insert('a'));
+        view.handle_command(EditorCommand::Insert('b'));
+        // The caret sits at the end of the buffer.
+        let mut session = PromptSession::open(&view, PromptPurpose::Find);
+
+        // "b" matches only before the caret, but the search wraps to it.
+        session.handle(&mut view, EditorCommand::Insert('b'));
+
+        assert_eq!((view.location.x, view.location.y), (1, 0));
+        assert_eq!(session.no_match_note(&view), None);
+    }
+
+    #[test]
     fn a_matching_find_pattern_has_no_note() {
         let mut view = view();
         view.handle_command(EditorCommand::Insert('a'));
         view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
         session.handle(&mut view, EditorCommand::Insert('b'));
@@ -420,6 +552,7 @@ mod tests {
         let mut view = view();
         view.handle_command(EditorCommand::Insert('a'));
         view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
         session.handle(&mut view, EditorCommand::Insert('z'));
@@ -484,15 +617,18 @@ mod tests {
         let mut view = view();
         view.handle_command(EditorCommand::Insert('a'));
         view.handle_command(EditorCommand::Insert('b'));
+        view.set_location(0, 0);
         let mut session = PromptSession::open(&view, PromptPurpose::Find);
 
-        session.handle(&mut view, EditorCommand::Insert('a'));
-        assert_eq!((view.location.x, view.location.y), (0, 0));
+        // "b" matches after the caret, so the search moves it.
+        session.handle(&mut view, EditorCommand::Insert('b'));
+        assert_eq!((view.location.x, view.location.y), (1, 0));
         let resolution = session.handle(&mut view, EditorCommand::Escape);
         assert_eq!(resolution, Some(PromptResolution::Cancelled));
         session.resolve(&mut view, PromptResolution::Cancelled);
 
-        assert_eq!((view.location.x, view.location.y), (2, 0));
+        // The caret is back where the search started.
+        assert_eq!((view.location.x, view.location.y), (0, 0));
     }
 
     #[test]
