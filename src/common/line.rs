@@ -7,6 +7,20 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// How a display segment of a line is highlighted, if at all. The view
+/// renders each kind differently: plain segments in the terminal's
+/// default colors, search matches in the match highlight, and the active
+/// match — the one the caret sits on — in its own, stronger highlight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentHighlight {
+    /// No highlight: drawn with the terminal's default colors.
+    None,
+    /// A search match that is not the active one.
+    Match,
+    /// The active search match, where the caret sits.
+    Active,
+}
+
 /// A single line of a buffer.
 ///
 /// The line's text is stored verbatim in `text` and is the single source
@@ -197,6 +211,38 @@ impl Line {
         Some(self.grapheme_index_at_byte(byte_index))
     }
 
+    /// The grapheme span of every occurrence of `pattern` in this line's
+    /// text, in document order, including overlapping occurrences. Each
+    /// span starts at the grapheme the occurrence starts in and covers one
+    /// grapheme per grapheme of the pattern — the same span the search
+    /// treats as the match, so a highlight built from these spans is
+    /// consistent with the search: every occurrence the search can reach
+    /// is covered, and nothing else is. An empty pattern is not a search
+    /// and yields no spans.
+    pub fn match_spans(&self, pattern: &str) -> Vec<Range<usize>> {
+        if pattern.is_empty() {
+            return Vec::new();
+        }
+        let span = pattern.grapheme_indices(true).count();
+        let mut spans = Vec::new();
+        let mut search_from = 0;
+        while let Some(relative) = self.text[search_from..].find(pattern) {
+            let byte_index = search_from.saturating_add(relative);
+            let start = self.grapheme_index_at_byte(byte_index);
+            spans.push(start..start.saturating_add(span));
+            // Step past the occurrence's first byte, so overlapping
+            // occurrences are found too. A match can only start at a char
+            // boundary, so a step that lands inside a multi-byte grapheme
+            // is skipped to the boundary past it.
+            let mut next = byte_index.saturating_add(1);
+            while next < self.text.len() && !self.text.is_char_boundary(next) {
+                next = next.saturating_add(1);
+            }
+            search_from = next;
+        }
+        spans
+    }
+
     /// Rebuilds the fragments from fragment `start` onward, reusing the
     /// untouched prefix. The line's text is the source of truth, so this
     /// re-derives the grapheme clusters and their byte indices for the part
@@ -302,7 +348,7 @@ impl Line {
     // draws its segments directly via [`Line::display_segments`].
     #[allow(dead_code)]
     pub fn get(&self, range: &Range<usize>) -> String {
-        self.display_segments(range, None)
+        self.display_segments(range, None, None)
             .into_iter()
             .map(|(text, _)| text)
             .collect()
@@ -310,18 +356,23 @@ impl Line {
 
     /// The visible portion of the line as display segments: the same
     /// truncation and ellipses as [`Line::get`], but with the graphemes of
-    /// `highlight` — a range of this line's grapheme indices — marked
-    /// `true` so the caller can render them differently, e.g. in reverse
-    /// video for a search match.
+    /// the open search marked so the caller can render them differently.
+    /// A grapheme covered by `active` — the grapheme span of the active
+    /// match, where the caret sits — is [`SegmentHighlight::Active`], a
+    /// grapheme covered by any span of `matches` — the grapheme spans of
+    /// the line's occurrences of the search pattern — is
+    /// [`SegmentHighlight::Match`], and every other grapheme is
+    /// [`SegmentHighlight::None`].
     ///
     /// A grapheme straddling an edge of `range` is not drawn; an ellipsis
     /// marks each edge that hides content.
     pub fn display_segments(
         &self,
         range: &Range<usize>,
-        highlight: Option<&Range<usize>>,
-    ) -> Vec<(String, bool)> {
-        let mut segments: Vec<(String, bool)> = Vec::new();
+        matches: Option<&[Range<usize>]>,
+        active: Option<&Range<usize>>,
+    ) -> Vec<(String, SegmentHighlight)> {
+        let mut segments: Vec<(String, SegmentHighlight)> = Vec::new();
         if self.fragments.is_empty() {
             return segments;
         }
@@ -341,21 +392,26 @@ impl Line {
             && self.width_until(idx.saturating_sub(1)) < range.start
             && self.width_until(idx) > range.start
         {
-            segments.push((String::from('…'), false));
+            segments.push((String::from('…'), SegmentHighlight::None));
         }
 
-        // Add graphemes within the visible range, marking the ones the
-        // highlight covers; consecutive graphemes with the same marking
+        // Add graphemes within the visible range, marking the ones a
+        // search highlight covers (the active match takes precedence over
+        // a plain match); consecutive graphemes with the same marking
         // join one segment.
         while idx < self.fragments.len() && self.width_until(idx.saturating_add(1)) <= range.end {
-            let highlighted = highlight
-                .as_ref()
-                .is_some_and(|h| h.contains(&idx));
+            let highlight = if active.is_some_and(|h| h.contains(&idx)) {
+                SegmentHighlight::Active
+            } else if matches.is_some_and(|m| m.iter().any(|h| h.contains(&idx))) {
+                SegmentHighlight::Match
+            } else {
+                SegmentHighlight::None
+            };
             match segments.last_mut() {
-                Some((text, marked)) if *marked == highlighted => {
+                Some((text, marked)) if *marked == highlight => {
                     text.push_str(self.display_text_of(idx));
                 }
-                _ => segments.push((self.display_text_of(idx).to_string(), highlighted)),
+                _ => segments.push((self.display_text_of(idx).to_string(), highlight)),
             }
             idx = idx.saturating_add(1);
         }
@@ -364,7 +420,7 @@ impl Line {
         // range cut off content, whether it straddled the edge or starts
         // past it.
         if idx < self.fragments.len() {
-            segments.push((String::from('…'), false));
+            segments.push((String::from('…'), SegmentHighlight::None));
         }
 
         segments
@@ -693,80 +749,205 @@ mod tests {
         assert_eq!(line.get(&(0..6)), "abcdef");
     }
 
-    fn segments_as_pairs(segments: &[(String, bool)]) -> Vec<(&str, bool)> {
-        segments.iter().map(|(text, hl)| (text.as_str(), *hl)).collect()
+    fn segments_as_pairs(segments: &[(String, SegmentHighlight)]) -> Vec<(&str, SegmentHighlight)> {
+        segments
+            .iter()
+            .map(|(text, hl)| (text.as_str(), *hl))
+            .collect()
     }
 
     #[test]
-    fn display_segments_without_a_highlight_match_get() {
+    fn display_segments_without_search_highlights_match_get() {
         let line = Line::from("abcdef");
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(1..7), None)),
-            vec![("bcdef", false)]
+            segments_as_pairs(&line.display_segments(&(1..7), None, None)),
+            vec![("bcdef", SegmentHighlight::None)]
         );
         // A straddling grapheme at the left edge is elided; the ellipsis
         // joins the unmarked text that follows it.
         let wide = Line::from("ab中cde");
         assert_eq!(
-            segments_as_pairs(&wide.display_segments(&(3..10), None)),
-            vec![("…cde", false)]
+            segments_as_pairs(&wide.display_segments(&(3..10), None, None)),
+            vec![("…cde", SegmentHighlight::None)]
         );
         // 中 starts exactly at column 2: no left ellipsis; d starts
         // exactly at column 5: hidden, elided. The right ellipsis stays
         // its own segment.
         assert_eq!(
-            segments_as_pairs(&wide.display_segments(&(2..5), None)),
-            vec![("中c", false), ("…", false)]
+            segments_as_pairs(&wide.display_segments(&(2..5), None, None)),
+            vec![
+                ("中c", SegmentHighlight::None),
+                ("…", SegmentHighlight::None)
+            ]
         );
     }
 
     #[test]
-    fn display_segments_marks_the_graphemes_of_the_highlight() {
+    fn display_segments_marks_the_graphemes_of_a_match() {
         let line = Line::from("hello world");
+        let world = 6..11;
+        let hello = 0..5;
+        let rld = 8..100;
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&(6..11)))),
-            vec![("hello ", false), ("world", true)]
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&[world]), None)),
+            vec![
+                ("hello ", SegmentHighlight::None),
+                ("world", SegmentHighlight::Match)
+            ]
         );
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&(0..5)))),
-            vec![("hello", true), (" world", false)]
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&[hello]), None)),
+            vec![
+                ("hello", SegmentHighlight::Match),
+                (" world", SegmentHighlight::None)
+            ]
         );
-        // A highlight past the end of the line marks what it covers.
+        // A match past the end of the line marks what it covers.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&(8..100)))),
-            vec![("hello wo", false), ("rld", true)]
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&[rld]), None)),
+            vec![
+                ("hello wo", SegmentHighlight::None),
+                ("rld", SegmentHighlight::Match)
+            ]
         );
     }
 
     #[test]
-    fn display_segments_clips_the_highlight_to_the_visible_range() {
+    fn display_segments_marks_every_match_of_the_line() {
+        let line = Line::from("hello world hello");
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), Some(&[0..5, 12..17]), None)),
+            vec![
+                ("hello", SegmentHighlight::Match),
+                (" world ", SegmentHighlight::None),
+                ("hello", SegmentHighlight::Match)
+            ]
+        );
+    }
+
+    #[test]
+    fn display_segments_marks_the_active_match_over_a_plain_match() {
+        let line = Line::from("hello world hello");
+        // The caret sits on the second "hello": it is the active match,
+        // the first one stays a plain match.
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(
+                &(0..20),
+                Some(&[0..5, 12..17]),
+                Some(&(12..17))
+            )),
+            vec![
+                ("hello", SegmentHighlight::Match),
+                (" world ", SegmentHighlight::None),
+                ("hello", SegmentHighlight::Active)
+            ]
+        );
+        // An active match without other matches marks only itself.
+        let other = Line::from("hello world");
+        assert_eq!(
+            segments_as_pairs(&other.display_segments(&(0..20), None, Some(&(6..11)))),
+            vec![
+                ("hello ", SegmentHighlight::None),
+                ("world", SegmentHighlight::Active)
+            ]
+        );
+    }
+
+    #[test]
+    fn display_segments_clips_the_matches_to_the_visible_range() {
         // Columns: h=0..e=4, space=5, w=6..d=10.
         let line = Line::from("hello world");
-        // The window [3..9) shows "lo wor": the highlight 6..11 reaches
+        let world = 6..11;
+        let head = 0..7;
+        let outside = 0..3;
+        // The window [3..9) shows "lo wor": the match 6..11 reaches
         // only w, o, r before the ellipsis cuts the rest.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..9), Some(&(6..11)))),
-            vec![("lo ", false), ("wor", true), ("…", false)]
+            segments_as_pairs(&line.display_segments(&(3..9), Some(&[world]), None)),
+            vec![
+                ("lo ", SegmentHighlight::None),
+                ("wor", SegmentHighlight::Match),
+                ("…", SegmentHighlight::None)
+            ]
         );
-        // A highlight that starts left of the window is clipped at it:
+        // A match that starts left of the window is clipped at it:
         // it still covers l, o, space and w, which are visible.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..20), Some(&(0..7)))),
-            vec![("lo w", true), ("orld", false)]
+            segments_as_pairs(&line.display_segments(&(3..20), Some(&[head]), None)),
+            vec![
+                ("lo w", SegmentHighlight::Match),
+                ("orld", SegmentHighlight::None)
+            ]
         );
-        // A highlight fully outside the window leaves every segment plain.
+        // A match fully outside the window leaves every segment plain.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..9), Some(&(0..3)))),
-            vec![("lo wor", false), ("…", false)]
+            segments_as_pairs(&line.display_segments(&(3..9), Some(&[outside]), None)),
+            vec![
+                ("lo wor", SegmentHighlight::None),
+                ("…", SegmentHighlight::None)
+            ]
         );
     }
 
     #[test]
     fn display_segments_of_an_empty_line_is_empty() {
         assert_eq!(
-            Line::from("").display_segments(&(0..10), None),
-            Vec::<(String, bool)>::new()
+            Line::from("").display_segments(&(0..10), None, None),
+            Vec::<(String, SegmentHighlight)>::new()
         );
+    }
+
+    #[test]
+    fn match_spans_finds_every_occurrence_of_the_pattern() {
+        let line = Line::from("hello world hello");
+        assert_eq!(line.match_spans("hello"), vec![0..5, 12..17]);
+        // Single and no occurrences.
+        assert_eq!(line.match_spans("world"), vec![6..11]);
+        assert_eq!(line.match_spans("zzz"), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn match_spans_reports_grapheme_indices_not_bytes() {
+        // 'é' is two bytes in UTF-8 but one grapheme, so the second
+        // "café" of "café café" starts at grapheme 5, not byte 6.
+        let line = Line::from("café café");
+        assert_eq!(line.match_spans("café"), vec![0..4, 5..9]);
+        assert_eq!(line.match_spans("latte"), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn match_spans_finds_overlapping_occurrences() {
+        let line = Line::from("aaa");
+        assert_eq!(line.match_spans("aa"), vec![0..2, 1..3]);
+    }
+
+    #[test]
+    fn match_spans_reports_the_grapheme_a_match_starts_in() {
+        // 'é' is one grapheme at index 3, and "fé" starts at 'f' (2) and
+        // covers the 'é' grapheme too.
+        let line = Line::from("café");
+        assert_eq!(line.match_spans("é"), vec![3..4]);
+        assert_eq!(line.match_spans("fé"), vec![2..4]);
+    }
+
+    #[test]
+    fn match_spans_of_an_empty_pattern_is_empty() {
+        assert_eq!(
+            Line::from("abc").match_spans(""),
+            Vec::<Range<usize>>::new()
+        );
+    }
+
+    #[test]
+    fn match_spans_on_an_empty_line_is_empty() {
+        assert_eq!(Line::from("").match_spans("a"), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn match_spans_counts_a_tab_as_one_grapheme() {
+        let line = Line::from("a\tb c");
+        assert_eq!(line.match_spans("\t"), vec![1..2]);
+        assert_eq!(line.match_spans("b c"), vec![2..5]);
     }
 
     #[test]

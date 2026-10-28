@@ -2,7 +2,7 @@ use crate::buffer::Buffer;
 use crate::common::constants::{
     DEFAULT_MESSAGE_DURATION, LONG_MESSAGE_DURATION, RESERVED_BOTTOM_LINES,
 };
-use crate::common::line::Line;
+use crate::common::line::{Line, SegmentHighlight};
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
 use crate::messagebar::{MessageBar, MessageState};
@@ -29,8 +29,9 @@ pub struct View {
     /// second consecutive Ctrl-Q then confirms the quit.
     quit_pending: bool,
     /// The pattern the open search prompt is searching for, if any. While
-    /// set, the buffer highlights the pattern's first match so the search
-    /// result is visible while the prompt is still open.
+    /// set, the buffer highlights every visible occurrence of the pattern —
+    /// and the occurrence the caret sits on stands out — so the search
+    /// results are visible while the prompt is still open.
     search_pattern: Option<String>,
 }
 
@@ -181,9 +182,12 @@ impl View {
             return;
         }
 
-        // The live search match, if any: only the row it sits on is drawn
-        // with a highlighted segment.
-        let highlight = self.live_search_highlight();
+        // The open live search, if any: every visible occurrence of the
+        // pattern is drawn in the match highlight, and the occurrence the
+        // caret sits on stands out in the active-match highlight. While no
+        // search is open — or its pattern is still empty — nothing is
+        // highlighted.
+        let active = self.live_search_highlight();
 
         for current_row in 0..height {
             let _ = Terminal::clear_row(current_row);
@@ -193,11 +197,18 @@ impl View {
             if let Some(line) = self.buffer.lines.get(buffer_row) {
                 let left = self.scroll_offset.col;
                 let right = self.scroll_offset.col.saturating_add(width);
-                let row_highlight = highlight
+                let matches = self.line_match_spans(line);
+                let row_active = active
                     .as_ref()
                     .filter(|(row, _)| *row == buffer_row)
                     .map(|(_, span)| span);
-                Self::render_buffer_row(current_row, line, &(left..right), row_highlight);
+                Self::render_buffer_row(
+                    current_row,
+                    line,
+                    &(left..right),
+                    matches.as_deref(),
+                    row_active,
+                );
             } else {
                 Self::render_line(current_row, "~");
             }
@@ -209,22 +220,30 @@ impl View {
     }
 
     /// Draws one buffer row: the line's visible portion as display
-    /// segments, with the live search match's span in reverse video where
-    /// `highlight` marks it.
+    /// segments, each drawn according to its highlight — plain, in the
+    /// match highlight where a span of `matches` covers it, and in the
+    /// stronger active-match highlight where `active` covers it.
     fn render_buffer_row(
         row: usize,
         line: &Line,
         range: &Range<usize>,
-        highlight: Option<&Range<usize>>,
+        matches: Option<&[Range<usize>]>,
+        active: Option<&Range<usize>>,
     ) {
         // `clear_row` keeps the cursor's column; the segments must start
         // at the row's beginning.
         let _ = Terminal::move_cursor_to(0, row);
-        for (text, highlighted) in line.display_segments(range, highlight) {
-            if highlighted {
-                let _ = Terminal::print_inverted(&text);
-            } else {
-                let _ = Terminal::print(&text);
+        for (text, highlight) in line.display_segments(range, matches, active) {
+            match highlight {
+                SegmentHighlight::None => {
+                    let _ = Terminal::print(&text);
+                }
+                SegmentHighlight::Match => {
+                    let _ = Terminal::print_match(&text);
+                }
+                SegmentHighlight::Active => {
+                    let _ = Terminal::print_active_match(&text);
+                }
             }
         }
     }
@@ -579,7 +598,7 @@ impl View {
     }
 
     /// Clears the live search when the search prompt closes, so the buffer
-    /// stops highlighting the match.
+    /// stops highlighting the matches.
     pub fn clear_live_search(&mut self) {
         if self.search_pattern.take().is_some() {
             self.modified = true;
@@ -600,11 +619,22 @@ impl View {
         self.live_search_highlight().is_some()
     }
 
-    /// The grapheme span of the live search match on its buffer row, while
-    /// the search prompt is open and its pattern matches at the caret:
-    /// `None` when no search is open, the pattern is empty, or the pattern
-    /// matches nothing in the buffer (the caret then rests at the search
-    /// origin, on no match).
+    /// The grapheme spans of every occurrence of the open live search
+    /// pattern on `line`, or none at all while no search is open or the
+    /// pattern is still empty, so no row is ever highlighted then. The
+    /// spans are the line's own, so they clip to the line's content.
+    fn line_match_spans(&self, line: &Line) -> Option<Vec<Range<usize>>> {
+        self.search_pattern
+            .as_deref()
+            .filter(|pattern| !pattern.is_empty())
+            .map(|pattern| line.match_spans(pattern))
+    }
+
+    /// The grapheme span of the active live search match on its buffer
+    /// row — the occurrence the caret sits on — while the search prompt is
+    /// open and its pattern matches at the caret: `None` when no search is
+    /// open, the pattern is empty, or the pattern matches nothing in the
+    /// buffer (the caret then rests at the search origin, on no match).
     ///
     /// A match counts even when an earlier occurrence of the pattern
     /// exists on the same line: the search may have started after it.
@@ -1302,6 +1332,86 @@ mod tests {
 
         assert_eq!((view.location.x, view.location.y), (4, 0));
         assert_eq!(view.live_search_highlight(), Some((0, 4..7)));
+    }
+
+    #[test]
+    fn line_match_spans_of_the_open_search_cover_every_occurrence_on_the_line() {
+        let mut view = make_view(&["hello world hello", "no match here"]);
+        view.update_live_search("hello", Location { x: 0, y: 0 });
+
+        assert_eq!(
+            view.line_match_spans(&view.buffer.lines[0]),
+            Some(vec![0..5, 12..17])
+        );
+        // The line without an occurrence gets no spans at all.
+        assert_eq!(
+            view.line_match_spans(&view.buffer.lines[1]),
+            Some(Vec::<Range<usize>>::new())
+        );
+    }
+
+    #[test]
+    fn line_match_spans_count_graphemes_not_bytes() {
+        let mut view = make_view(&["café latte"]);
+        view.update_live_search("café", Location { x: 0, y: 0 });
+
+        // 'é' is one grapheme, so "café" spans four graphemes.
+        let cafe = 0..4;
+        assert_eq!(
+            view.line_match_spans(&view.buffer.lines[0]),
+            Some(vec![cafe])
+        );
+    }
+
+    #[test]
+    fn line_match_spans_are_none_without_an_open_search() {
+        let view = make_view(&["abc abc"]);
+
+        assert_eq!(view.line_match_spans(&view.buffer.lines[0]), None);
+    }
+
+    #[test]
+    fn line_match_spans_of_an_empty_pattern_are_none() {
+        let mut view = make_view(&["abc"]);
+        view.update_live_search("", Location { x: 0, y: 0 });
+
+        // An empty pattern is no search yet: nothing is highlighted.
+        assert_eq!(view.line_match_spans(&view.buffer.lines[0]), None);
+    }
+
+    #[test]
+    fn line_match_spans_of_a_pattern_that_matches_nowhere_are_empty() {
+        let mut view = make_view(&["abc"]);
+        view.update_live_search("zzz", Location { x: 0, y: 0 });
+
+        assert_eq!(
+            view.line_match_spans(&view.buffer.lines[0]),
+            Some(Vec::<Range<usize>>::new())
+        );
+    }
+
+    #[test]
+    fn line_match_spans_are_none_after_the_search_is_cleared() {
+        let mut view = make_view(&["abc abc"]);
+        view.update_live_search("abc", Location { x: 0, y: 0 });
+        view.clear_live_search();
+
+        // Dismissing the search removes the highlights again.
+        assert_eq!(view.line_match_spans(&view.buffer.lines[0]), None);
+    }
+
+    #[test]
+    fn the_active_match_is_one_of_the_line_matches() {
+        let mut view = make_view(&["hello world hello"]);
+        view.update_live_search("hello", Location { x: 0, y: 0 });
+
+        // The active match stands out, but it is still one of the line's
+        // matches: the highlight never marks more than the search does.
+        let (_, active) = view.live_search_highlight().expect("the search matches");
+        let spans = view
+            .line_match_spans(&view.buffer.lines[0])
+            .expect("the line has matches");
+        assert!(spans.contains(&active));
     }
 
     #[test]

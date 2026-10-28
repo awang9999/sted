@@ -1,5 +1,5 @@
 use crossterm::cursor::{Hide, MoveTo, MoveToRow, Show};
-use crossterm::style::{Attribute, Print};
+use crossterm::style::{Attribute, Color, Print, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{
     Clear, ClearType, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen,
     SetTitle, disable_raw_mode, enable_raw_mode, size,
@@ -143,15 +143,61 @@ impl Terminal {
         Ok(())
     }
 
-    /// Prints `string` in reverse video at the cursor's current position,
-    /// continuing the row rather than rewriting it.
-    pub fn print_inverted(string: &str) -> Result<(), Error> {
-        let inverted_str = format!(
-            "{}{}{}",
-            Attribute::Reverse, string,
+    /// Prints `string` at the cursor's current position with the given
+    /// foreground and background colors, continuing the row rather than
+    /// rewriting it. The reset at the end restores the terminal's default
+    /// colors, so the row's following segments are drawn plain.
+    fn print_styled(string: &str, foreground: Color, background: Color) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}{}",
+            SetForegroundColor(foreground),
+            SetBackgroundColor(background),
+            string,
             Attribute::Reset
         );
-        Self::print(&inverted_str)?;
+        Self::print(&styled_str)?;
+        Ok(())
+    }
+
+    /// Prints a search match at the cursor's current position: black text
+    /// on a warm mid-gray background, continuing the row rather than
+    /// rewriting it. The warm gray carries a subtle yellow tinge, bright
+    /// enough to stand out on a dark terminal while staying clearly below
+    /// the active match's lighter warm gray.
+    pub fn print_match(string: &str) -> Result<(), Error> {
+        Self::print_styled(
+            string,
+            Color::Rgb { r: 0, g: 0, b: 0 },
+            Color::Rgb {
+                r: 153,
+                g: 153,
+                b: 102,
+            },
+        )
+    }
+
+    /// Prints the active search match — the one the caret sits on — at the
+    /// cursor's current position: bold dark gray text on a warm light-gray
+    /// background with a subtle yellow tinge, popping brighter than the
+    /// other matches.
+    pub fn print_active_match(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}{}{}",
+            Attribute::Bold,
+            SetForegroundColor(Color::Rgb {
+                r: 64,
+                g: 64,
+                b: 64,
+            }),
+            SetBackgroundColor(Color::Rgb {
+                r: 220,
+                g: 220,
+                b: 169,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)?;
         Ok(())
     }
 
