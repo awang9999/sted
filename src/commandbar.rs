@@ -179,7 +179,7 @@ impl CommandBar {
 
     /// Draws the bar's row, optionally with a trailing note (like
     /// "(No matches)") right of the typed text, after the caret.
-    pub fn render(&mut self, trailing: Option<&str>) {
+    pub fn render(&self, trailing: Option<&str>) {
         let row = self.layout.row();
         let text = self.as_line(trailing);
         let _ = Terminal::clear_row(row);
@@ -479,14 +479,8 @@ mod tests {
         // 16 text columns in 11 available: the same tail is elided with or
         // without the note; at this width the note simply does not fit.
         let bar = bar_with_text("0123456789abcdef", 20);
-        assert_eq!(
-            bar.as_line(Some("(No matches)")),
-            bar.as_line(None)
-        );
-        assert_eq!(
-            bar.as_line(Some("(No matches)")),
-            "Save as: …6789abcdef"
-        );
+        assert_eq!(bar.as_line(Some("(No matches)")), bar.as_line(None));
+        assert_eq!(bar.as_line(Some("(No matches)")), "Save as: …6789abcdef");
     }
 
     #[test]

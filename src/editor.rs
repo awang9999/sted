@@ -172,7 +172,7 @@ impl Editor {
         // While a prompt is active it replaces the message bar, so it
         // draws after the view (which may still redraw the message bar)
         // and it owns the terminal cursor.
-        let caret_position = match &mut self.prompt {
+        let caret_position = match &self.prompt {
             Some(session) => session.render(&self.view),
             None => self.view.get_caret_position(),
         };

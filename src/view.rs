@@ -8,7 +8,6 @@ use crate::editorcommand::{Direction, EditorCommand};
 use crate::messagebar::{MessageBar, MessageState};
 use crate::statusbar::{DocumentStatus, StatusBar};
 use crate::terminal::{Position, Size, Terminal};
-use std::cmp::min;
 use std::ops::Range;
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,7 +17,10 @@ const DEFAULT_MESSAGE: &str = "HELP: Ctrl-F = find | Ctrl-S = save | Ctrl-Q = qu
 
 pub struct View {
     buffer: Buffer,
-    modified: bool,
+    /// True when the buffer viewport has changed since the last render and
+    /// must be drawn again. Distinct from `Buffer.modified`, which tracks
+    /// unsaved changes.
+    needs_redraw: bool,
     size: Size,
     pub location: Location,      // location in the text (col, row) of grapheme
     pub scroll_offset: Position, // top left corner of viewport as a grid (independent of grapheme width)
@@ -41,7 +43,7 @@ impl View {
         message_bar.set_message(String::from(DEFAULT_MESSAGE), DEFAULT_MESSAGE_DURATION);
         View {
             buffer: Buffer::default(),
-            modified: true,
+            needs_redraw: true,
             size: Self::viewport_size(size),
             location: Location::default(),
             scroll_offset: Position::default(),
@@ -112,7 +114,7 @@ impl View {
             let _ = Terminal::clear_row(to.height.saturating_sub(1));
         }
         self.size = Self::viewport_size(to);
-        self.modified = true;
+        self.needs_redraw = true;
         self.status_bar.resize(to);
         self.message_bar.resize(to);
     }
@@ -128,7 +130,7 @@ impl View {
                 self.set_message(error, LONG_MESSAGE_DURATION);
             }
         }
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     pub fn get_caret_position(&self) -> Position {
@@ -260,21 +262,21 @@ impl View {
     pub fn render(&mut self) {
         let terminal_height = Terminal::size().unwrap().height;
 
-        // The buffer needs one viewport row, i.e. three terminal rows once
-        // the reserved bottom rows are included.
-        if terminal_height >= 3 && self.modified {
+        // The buffer needs one viewport row: a terminal taller than the
+        // reserved bottom rows.
+        if terminal_height > RESERVED_BOTTOM_LINES && self.needs_redraw {
             self.render_buffer();
 
             if self.buffer.is_empty() {
                 let _ = self.render_welcome_screen();
             }
 
-            self.modified = false;
+            self.needs_redraw = false;
         }
 
         // The bar always draws from the view's current state, so it can
         // never lag behind the buffer or the caret.
-        if terminal_height >= 2 {
+        if terminal_height >= RESERVED_BOTTOM_LINES {
             self.status_bar.update(self.get_status());
             self.status_bar.render();
         }
@@ -286,29 +288,22 @@ impl View {
     }
 
     fn render_welcome_screen(&self) -> Result<(), std::io::Error> {
-        let welcome = "Welcome to STED!";
-        let sted = "The (S)imple (T)erminal (Ed)itor";
-        let version = "Version 1.0.0";
+        const LINES: [&str; 3] = [
+            "Welcome to STED!",
+            "The (S)imple (T)erminal (Ed)itor",
+            "Version 1.0.0",
+        ];
 
         #[allow(clippy::integer_division)]
-        let welcome_row = (self.size.height / 2).saturating_sub(2);
-        // we allow this since we don't care if our welcome message is put _exactly_ in the middle.
-        // it's allowed to be a bit to the left or right.
-        #[allow(clippy::integer_division)]
-        let welcome_col = self.size.width.saturating_sub(welcome.len()) / 2;
-        let sted_row = welcome_row.saturating_add(1);
-        #[allow(clippy::integer_division)]
-        let sted_col = self.size.width.saturating_sub(sted.len()) / 2;
-        let version_row = welcome_row.saturating_add(2);
-        #[allow(clippy::integer_division)]
-        let version_col = self.size.width.saturating_sub(version.len()) / 2;
-
-        Terminal::print_at(welcome_col.saturating_sub(1), welcome_row, welcome)?;
-
-        Terminal::print_at(sted_col.saturating_sub(1), sted_row, sted)?;
-
-        Terminal::print_at(version_col.saturating_sub(1), version_row, version)?;
-
+        let top_row = (self.size.height / 2).saturating_sub(2);
+        // We don't care if the welcome message lands _exactly_ in the
+        // middle: it's allowed to sit a bit to the left or right.
+        for (offset, text) in LINES.into_iter().enumerate() {
+            let row = top_row.saturating_add(offset);
+            #[allow(clippy::integer_division)]
+            let col = self.size.width.saturating_sub(text.len()) / 2;
+            Terminal::print_at(col.saturating_sub(1), row, text)?;
+        }
         Ok(())
     }
 
@@ -318,22 +313,12 @@ impl View {
         let buffer_length = self.buffer.lines.len();
 
         match direction {
-            // Vertical movements
+            // Vertical movements; Down and PageDown clamp at the "one past
+            // the end" row, which is the furthest row we allow navigating to.
             Direction::Up => y = y.saturating_sub(1),
-            Direction::Down => {
-                if y < buffer_length {
-                    y = y.saturating_add(1).min(buffer_length);
-                }
-            }
+            Direction::Down => y = y.saturating_add(1).min(buffer_length),
             Direction::PageUp => y = y.saturating_sub(height),
-            Direction::PageDown => {
-                let page_y = y.saturating_add(height);
-                if page_y > buffer_length || self.buffer.lines.is_empty() {
-                    y = buffer_length;
-                } else {
-                    y = page_y.min(buffer_length);
-                }
-            }
+            Direction::PageDown => y = y.saturating_add(height).min(buffer_length),
 
             // Horizontal movements
             Direction::Left => {
@@ -380,7 +365,7 @@ impl View {
                 .buffer
                 .lines
                 .get(y)
-                .map_or(0, |l| min(self.desired_x, l.grapheme_count()));
+                .map_or(0, |l| self.desired_x.min(l.grapheme_count()));
         }
 
         self.set_location(x, y);
@@ -403,16 +388,11 @@ impl View {
             scroll.row = y.saturating_sub(height).saturating_add(1);
         }
 
-        // Horizontal scroll - when cursor is past EOF, horizontal scroll data doesn't exist yet
+        // Horizontal scroll - when the cursor is on the "one past the end"
+        // row, there is no line to take the horizontal scroll from, and
+        // `clamped_y` lands on the last line instead.
         let clamped_y = y.min(self.buffer.lines.len().saturating_sub(1));
-        let line = if self.buffer.lines.is_empty() {
-            None
-        } else {
-            self.buffer
-                .lines
-                .get(clamped_y)
-                .or_else(|| self.buffer.lines.last())
-        };
+        let line = self.buffer.lines.get(clamped_y);
 
         if let Some(line) = line {
             // Use the target line's saved horizontal offset as the baseline
@@ -451,15 +431,11 @@ impl View {
         // must not be cleared: re-rendering is the only way that change
         // becomes visible.
         self.scroll_offset = scroll;
-        self.modified = self.modified || scroll.col != prev.col || scroll.row != prev.row;
+        self.needs_redraw = self.needs_redraw || scroll.col != prev.col || scroll.row != prev.row;
     }
 
     pub fn set_location(&mut self, x: usize, y: usize) {
-        self.set_location_coord(Location { x, y });
-    }
-
-    pub fn set_location_coord(&mut self, pos: Location) {
-        self.location = pos;
+        self.location = Location { x, y };
     }
 
     /// Moves the caret to the first occurrence of `pattern` at or after
@@ -533,7 +509,7 @@ impl View {
         }
 
         self.scroll_offset = scroll;
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     /// Updates the live search shown in the buffer while the search prompt
@@ -548,7 +524,7 @@ impl View {
             Some(location) => self.set_location_and_center(location),
             None => self.set_location_and_scroll(origin),
         }
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     /// Moves the caret to the next occurrence of the open live search
@@ -557,9 +533,8 @@ impl View {
     /// Does nothing while no search is open, the pattern is empty, or the
     /// pattern matches nothing in the buffer.
     pub fn search_next(&mut self) {
-        let pattern = match self.search_pattern.as_deref() {
-            Some(pattern) if !pattern.is_empty() => pattern,
-            _ => return,
+        let Some(pattern) = self.active_search_pattern() else {
+            return;
         };
         // The match begins at the caret and spans one grapheme per
         // pattern grapheme, so the next match starts after the match's
@@ -568,14 +543,14 @@ impl View {
             x: self
                 .location
                 .x
-                .saturating_add(pattern.grapheme_indices(true).count()),
+                .saturating_add(Self::pattern_grapheme_count(pattern)),
             y: self.location.y,
         };
         if let Some(location) = self.buffer.find_wrapping(pattern, start) {
             self.set_location_and_scroll(location);
             // The highlight follows the caret, so a moved match needs a
             // re-render even when the scroll did not change.
-            self.modified = true;
+            self.needs_redraw = true;
         }
     }
 
@@ -585,15 +560,14 @@ impl View {
     /// into view. Does nothing while no search is open, the pattern is
     /// empty, or the pattern matches nothing in the buffer.
     pub fn search_prev(&mut self) {
-        let pattern = match self.search_pattern.as_deref() {
-            Some(pattern) if !pattern.is_empty() => pattern,
-            _ => return,
+        let Some(pattern) = self.active_search_pattern() else {
+            return;
         };
         if let Some(location) = self.buffer.find_wrapping_before(pattern, self.location) {
             self.set_location_and_scroll(location);
             // The highlight follows the caret, so a moved match needs a
             // re-render even when the scroll did not change.
-            self.modified = true;
+            self.needs_redraw = true;
         }
     }
 
@@ -601,7 +575,7 @@ impl View {
     /// stops highlighting the matches.
     pub fn clear_live_search(&mut self) {
         if self.search_pattern.take().is_some() {
-            self.modified = true;
+            self.needs_redraw = true;
         }
     }
 
@@ -612,6 +586,22 @@ impl View {
         self.search_pattern.as_deref()
     }
 
+    /// The pattern the open search is actually searching for: `None`
+    /// while no search is open or while the pattern is still empty — an
+    /// empty pattern is no search yet, so it matches and highlights
+    /// nothing.
+    fn active_search_pattern(&self) -> Option<&str> {
+        self.search_pattern
+            .as_deref()
+            .filter(|pattern| !pattern.is_empty())
+    }
+
+    /// The number of graphemes in `pattern`: how far one of its
+    /// occurrences extends in grapheme indices.
+    fn pattern_grapheme_count(pattern: &str) -> usize {
+        pattern.grapheme_indices(true).count()
+    }
+
     /// Whether the open live search currently matches the buffer: false
     /// while no search is open, while the pattern is still empty, or
     /// while the pattern has no match.
@@ -620,46 +610,40 @@ impl View {
     }
 
     /// The grapheme spans of every occurrence of the open live search
-    /// pattern on `line`, or none at all while no search is open or the
-    /// pattern is still empty, so no row is ever highlighted then. The
-    /// spans are the line's own, so they clip to the line's content.
+    /// pattern on `line`, or none at all while there is no active
+    /// search, so no row is ever highlighted then. The spans are the
+    /// line's own, so they clip to the line's content.
     fn line_match_spans(&self, line: &Line) -> Option<Vec<Range<usize>>> {
-        self.search_pattern
-            .as_deref()
-            .filter(|pattern| !pattern.is_empty())
+        self.active_search_pattern()
             .map(|pattern| line.match_spans(pattern))
     }
 
     /// The grapheme span of the active live search match on its buffer
-    /// row — the occurrence the caret sits on — while the search prompt is
-    /// open and its pattern matches at the caret: `None` when no search is
-    /// open, the pattern is empty, or the pattern matches nothing in the
-    /// buffer (the caret then rests at the search origin, on no match).
+    /// row — the occurrence the caret sits on — while the search is
+    /// active and its pattern matches at the caret: `None` when there is
+    /// no active search or the pattern matches nothing in the buffer
+    /// (the caret then rests at the search origin, on no match).
     ///
     /// A match counts even when an earlier occurrence of the pattern
     /// exists on the same line: the search may have started after it.
     fn live_search_highlight(&self) -> Option<(usize, Range<usize>)> {
-        let pattern = self.search_pattern.as_deref()?;
-        if pattern.is_empty() {
-            return None;
-        }
+        let pattern = self.active_search_pattern()?;
         let line = self.buffer.lines.get(self.location.y)?;
         if line.find_from(pattern, self.location.x) != Some(self.location.x) {
             return None;
         }
-        let span = pattern.grapheme_indices(true).count();
-        Some((
-            self.location.y,
-            self.location.x..self.location.x.saturating_add(span),
-        ))
+        let start = self.location.x;
+        let span = start..start.saturating_add(Self::pattern_grapheme_count(pattern));
+        Some((self.location.y, span))
     }
 
-    /// Inserts a character, moves the caret right, scrolls it into view, marks buffer and view as modified.
+    /// Inserts a character, moves the caret right, scrolls it into view, and
+    /// marks the buffer modified and the view dirty.
     fn handle_insert(&mut self, c: char) {
         self.buffer.insert_char(self.location, c);
         self.set_location(self.location.x.saturating_add(1), self.location.y);
         self.scroll_location_into_view();
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     /// Splits the line at the caret (or appends an empty line when the caret
@@ -670,13 +654,14 @@ impl View {
         self.set_location(new_location.x, new_location.y);
         self.desired_x = 0;
         self.scroll_location_into_view();
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
-    /// Deletes the grapheme cluster at the caret position and marks the view as modified.
+    /// Deletes the grapheme cluster at the caret position and marks the view
+    /// dirty.
     fn handle_delete(&mut self) {
         self.buffer.delete(self.location);
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     fn handle_backspace(&mut self) {
@@ -699,7 +684,7 @@ impl View {
         }
 
         // guarantees a re-render.
-        self.modified = true;
+        self.needs_redraw = true;
     }
 
     /// Associates the buffer with `file_name` and saves it to that file,
@@ -751,7 +736,7 @@ mod tests {
         });
         View {
             buffer,
-            modified: false,
+            needs_redraw: false,
             size: terminal_size,
             location: Location::default(),
             scroll_offset: Position::default(),
@@ -1126,7 +1111,7 @@ mod tests {
         assert_eq!((view.location.x, view.location.y), (6, 0));
         assert_eq!(view.live_search_highlight(), Some((0, 6..11)));
         // The highlight only appears after a re-render.
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1150,7 +1135,7 @@ mod tests {
         assert_eq!((view.location.x, view.location.y), (1, 0));
         assert_eq!(view.live_search_highlight(), None);
         // The (cleared) highlight still needs a re-render.
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1162,7 +1147,7 @@ mod tests {
         view.update_live_search("", Location { x: 0, y: 0 });
 
         assert_eq!(view.live_search_highlight(), None);
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1226,7 +1211,7 @@ mod tests {
         assert_eq!(view.live_search_highlight(), Some((0, 12..17)));
         // The highlight moved, so the view must re-render even though the
         // scroll did not change.
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1263,7 +1248,7 @@ mod tests {
 
         assert_eq!((view.location.x, view.location.y), (0, 0));
         assert_eq!(view.live_search_highlight(), Some((0, 0..5)));
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1418,12 +1403,12 @@ mod tests {
     fn clear_live_search_removes_the_highlight_and_marks_the_view() {
         let mut view = make_view(&["abc"]);
         view.update_live_search("a", Location { x: 0, y: 0 });
-        view.modified = false;
+        view.needs_redraw = false;
 
         view.clear_live_search();
 
         assert_eq!(view.live_search_highlight(), None);
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1435,8 +1420,8 @@ mod tests {
         // pass then consumes the flag, so the highlight is on screen.
         view.update_live_search("b", Location { x: 0, y: 0 });
         assert_eq!((view.location.x, view.location.y), (1, 0));
-        assert!(view.modified);
-        view.modified = false;
+        assert!(view.needs_redraw);
+        view.needs_redraw = false;
 
         // Dismissing the search: clear the highlight, then restore the
         // caret where the search began — without a scroll change in
@@ -1446,17 +1431,17 @@ mod tests {
 
         // The view must stay dirty, or the last rendered frame still
         // shows the highlighted match.
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
     fn clear_live_search_without_an_open_search_is_a_noop() {
         let mut view = make_view(&["abc"]);
-        view.modified = false;
+        view.needs_redraw = false;
 
         view.clear_live_search();
 
-        assert!(!view.modified);
+        assert!(!view.needs_redraw);
     }
 
     #[test]
@@ -1585,9 +1570,9 @@ mod tests {
     }
 
     #[test]
-    fn resize_shrink_updates_viewport_and_marks_modified() {
+    fn resize_shrink_updates_viewport_and_marks_the_view_dirty() {
         let mut view = make_view(&["a", "b"]);
-        view.modified = false;
+        view.needs_redraw = false;
 
         view.resize(Size {
             width: 80,
@@ -1599,16 +1584,16 @@ mod tests {
             20usize.saturating_sub(RESERVED_BOTTOM_LINES)
         );
         assert_eq!(view.size.width, 80);
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
-    fn handle_delete_marks_view_as_modified() {
+    fn handle_delete_marks_the_view_dirty() {
         let mut view = make_view(&["abc"]);
-        assert!(!view.modified); // render clears modified
+        assert!(!view.needs_redraw); // a render clears the dirty flag
 
         view.handle_delete();
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1637,7 +1622,7 @@ mod tests {
         let mut view = make_view(&["abc"]);
         // Location is (0, 0) which is within bounds — buffer.delete handles row-OOB internally
         view.handle_delete();
-        assert!(view.modified);
+        assert!(view.needs_redraw);
         let text: String = view.buffer.lines[0].to_string();
         assert!(!text.contains('a'));
     }
@@ -1655,7 +1640,7 @@ mod tests {
         view.handle_delete();
         assert_eq!(view.buffer.lines[1].grapheme_count(), second_len_before - 1);
 
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1670,7 +1655,7 @@ mod tests {
         assert_eq!(text, "abcd");
         // caret lands at the end of the previous line
         assert_eq!((view.location.x, view.location.y), (2, 0));
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1711,12 +1696,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_insert_marks_view_as_modified() {
+    fn handle_insert_marks_the_view_dirty() {
         let mut view = make_view(&["hello"]);
-        assert!(!view.modified); // render clears modified
+        assert!(!view.needs_redraw); // a render clears the dirty flag
 
         view.handle_insert('x');
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1873,7 +1858,7 @@ mod tests {
         assert_eq!(top, "abc");
         assert_eq!(bottom, "def");
         assert_eq!((view.location.x, view.location.y), (0, 1));
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]
@@ -1940,7 +1925,7 @@ mod tests {
         let texts: Vec<String> = view.buffer.lines.iter().map(ToString::to_string).collect();
         assert_eq!(texts, vec!["first", "se", "cond", "third"]);
         assert_eq!((view.location.x, view.location.y), (0, 2));
-        assert!(view.modified);
+        assert!(view.needs_redraw);
     }
 
     #[test]

@@ -1,9 +1,22 @@
-#[derive(Clone)]
+use crate::common::constants::TAB_WIDTH_SPACES;
+
+#[derive(Clone, Copy)]
 pub enum GraphemeWidth {
     Half,
     Full,
     /// A tab, which renders as `TAB_WIDTH_SPACES` columns of spaces.
     Tab,
+}
+
+impl GraphemeWidth {
+    /// The number of terminal columns the grapheme occupies.
+    pub const fn columns(self) -> usize {
+        match self {
+            GraphemeWidth::Half => 1,
+            GraphemeWidth::Full => 2,
+            GraphemeWidth::Tab => TAB_WIDTH_SPACES,
+        }
+    }
 }
 
 /// Layout information for one grapheme cluster of a line. The grapheme
@@ -17,18 +30,4 @@ pub struct TextFragment {
     pub byte_index: usize,
     pub rendered_width: GraphemeWidth,
     pub replacement: Option<String>,
-}
-
-impl TextFragment {
-    pub fn from(
-        byte_index: usize,
-        rendered_width: GraphemeWidth,
-        replacement: Option<String>,
-    ) -> Self {
-        Self {
-            byte_index,
-            rendered_width,
-            replacement,
-        }
-    }
 }

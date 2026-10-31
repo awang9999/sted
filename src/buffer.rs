@@ -65,9 +65,7 @@ impl Buffer {
         {
             return Some(Location { x, y: before_y });
         }
-        (0..before_y)
-            .rev()
-            .find_map(|y| self.lines[y].rfind(pattern).map(|x| Location { x, y }))
+        self.rfind_up_to(pattern, before_y)
     }
 
     /// The location of the last occurrence of `pattern` ending at or
@@ -80,10 +78,15 @@ impl Buffer {
         if pattern.is_empty() {
             return None;
         }
-        if let Some(location) = self.find_before(pattern, before) {
-            return Some(location);
-        }
-        (0..self.lines.len())
+        self.find_before(pattern, before)
+            .or_else(|| self.rfind_up_to(pattern, self.lines.len()))
+    }
+
+    /// The location of the last occurrence of `pattern` on the lines
+    /// `0..upper`, scanning them backwards, or `None` when none of those
+    /// lines contains the pattern.
+    fn rfind_up_to(&self, pattern: &str, upper: usize) -> Option<Location> {
+        (0..upper.min(self.lines.len()))
             .rev()
             .find_map(|y| self.lines[y].rfind(pattern).map(|x| Location { x, y }))
     }
@@ -111,9 +114,9 @@ impl Buffer {
         if let Some(file_name) = &self.file_name {
             let mut file = File::create(file_name)?;
             for line in &self.lines {
-                // The line keeps its text verbatim, so saving writes it
-                // directly without re-assembling anything.
-                writeln!(file, "{}", line.text())?;
+                // The line's Display writes its text verbatim, so saving
+                // writes it directly without re-assembling anything.
+                writeln!(file, "{line}")?;
             }
             self.modified = false;
             Ok(())
@@ -134,12 +137,11 @@ impl Buffer {
     /// Inserts character `c` at column `location.x` on row `location.y`. Creates a new line if the row exceeds the buffer length.
     pub fn insert_char(&mut self, location: Location, c: char) {
         if location.y >= self.lines.len() {
-            self.lines.push(Line::from(&format!("{c}")));
-            self.modified = true;
-        } else if let Some(line) = self.lines.get_mut(location.y) {
-            line.insert_char(location.x, c);
-            self.modified = true;
+            self.lines.push(Line::from_char(c));
+        } else {
+            self.lines[location.y].insert_char(location.x, c);
         }
+        self.modified = true;
     }
 
     /// Handles Enter pressed at `location` and returns the location the caret
@@ -206,15 +208,9 @@ mod tests {
     use super::*;
     use crate::common::types::Location;
 
-    fn make_line(s: &str) -> Line {
-        let mut l = Line::from(s);
-        l.scroll_x = 0;
-        l
-    }
-
     fn make_buffer(lines_data: &[&str]) -> Buffer {
         Buffer {
-            lines: lines_data.iter().copied().map(make_line).collect(),
+            lines: lines_data.iter().copied().map(Line::from).collect(),
             modified: false,
             file_name: None,
         }
@@ -422,17 +418,13 @@ mod tests {
     // - When `location.y >= lines.len()` it *creates* a new line at that index.
     // - The Line::insert_char inside gets x past the end of the line, which is okay (inserts at EOF).
 
-    fn line_text(line: &Line) -> String {
-        line.to_string()
-    }
-
     #[test]
     fn newline_splits_line_in_middle() {
         let mut buf = make_buffer(&["abcdef"]);
         let caret = buf.newline(Location { x: 3, y: 0 });
         assert_eq!(buf.lines.len(), 2);
-        assert_eq!(line_text(&buf.lines[0]), "abc");
-        assert_eq!(line_text(&buf.lines[1]), "def");
+        assert_eq!(buf.lines[0].to_string(), "abc");
+        assert_eq!(buf.lines[1].to_string(), "def");
         assert_eq!((caret.x, caret.y), (0, 1));
     }
 
@@ -442,7 +434,7 @@ mod tests {
         let caret = buf.newline(Location { x: 0, y: 0 });
         assert_eq!(buf.lines.len(), 2);
         assert_eq!(buf.lines[0].grapheme_count(), 0);
-        assert_eq!(line_text(&buf.lines[1]), "abcdef");
+        assert_eq!(buf.lines[1].to_string(), "abcdef");
         assert_eq!((caret.x, caret.y), (0, 1));
     }
 
@@ -451,7 +443,7 @@ mod tests {
         let mut buf = make_buffer(&["abcdef"]);
         let caret = buf.newline(Location { x: 6, y: 0 });
         assert_eq!(buf.lines.len(), 2);
-        assert_eq!(line_text(&buf.lines[0]), "abcdef");
+        assert_eq!(buf.lines[0].to_string(), "abcdef");
         assert_eq!(buf.lines[1].grapheme_count(), 0);
         assert_eq!((caret.x, caret.y), (0, 1));
     }
@@ -461,7 +453,7 @@ mod tests {
         let mut buf = make_buffer(&["ab"]);
         let caret = buf.newline(Location { x: 5, y: 0 });
         assert_eq!(buf.lines.len(), 2);
-        assert_eq!(line_text(&buf.lines[0]), "ab");
+        assert_eq!(buf.lines[0].to_string(), "ab");
         assert_eq!(buf.lines[1].grapheme_count(), 0);
         assert_eq!((caret.x, caret.y), (0, 1));
     }
@@ -472,8 +464,8 @@ mod tests {
         // Row 2 is the "one past the end" position we allow navigating to
         let caret = buf.newline(Location { x: 0, y: 2 });
         assert_eq!(buf.lines.len(), 3);
-        assert_eq!(line_text(&buf.lines[0]), "abc");
-        assert_eq!(line_text(&buf.lines[1]), "def");
+        assert_eq!(buf.lines[0].to_string(), "abc");
+        assert_eq!(buf.lines[1].to_string(), "def");
         assert_eq!(buf.lines[2].grapheme_count(), 0);
         assert_eq!((caret.x, caret.y), (0, 2));
     }
@@ -492,10 +484,10 @@ mod tests {
         let mut buf = make_buffer(&["first", "second", "third"]);
         let caret = buf.newline(Location { x: 2, y: 1 });
         assert_eq!(buf.lines.len(), 4);
-        assert_eq!(line_text(&buf.lines[0]), "first");
-        assert_eq!(line_text(&buf.lines[1]), "se");
-        assert_eq!(line_text(&buf.lines[2]), "cond");
-        assert_eq!(line_text(&buf.lines[3]), "third");
+        assert_eq!(buf.lines[0].to_string(), "first");
+        assert_eq!(buf.lines[1].to_string(), "se");
+        assert_eq!(buf.lines[2].to_string(), "cond");
+        assert_eq!(buf.lines[3].to_string(), "third");
         assert_eq!((caret.x, caret.y), (0, 2));
     }
 

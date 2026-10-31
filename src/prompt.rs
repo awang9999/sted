@@ -92,9 +92,9 @@ pub enum PromptResolution {
 pub struct PromptSession {
     bar: CommandBar,
     purpose: PromptPurpose,
-    /// The caret position the buffer had when a find prompt opened, so
-    /// dismissing the search can restore it.
-    find_origin: Option<Location>,
+    /// The caret position the buffer had when the prompt opened; a
+    /// dismissed search restores it.
+    origin: Location,
 }
 
 impl PromptSession {
@@ -108,11 +108,11 @@ impl PromptSession {
         }
         // A find prompt moves the caret while it is open; remember where
         // it was so dismissing the search can restore it.
-        let find_origin = (purpose == PromptPurpose::Find).then_some(view.location);
+        let origin = view.location;
         Self {
             bar,
             purpose,
-            find_origin,
+            origin,
         }
     }
 
@@ -157,14 +157,12 @@ impl PromptSession {
 
         match self.bar.handle_command(command) {
             CommandBarOutcome::Stay => {
-                if self.purpose == PromptPurpose::Find
-                    && let Some(origin) = self.find_origin
-                    && self.bar.get_text() != pattern_before
-                {
+                let pattern = self.bar.get_text();
+                if self.purpose == PromptPurpose::Find && pattern != pattern_before {
                     // A pattern without a match puts the caret back where
                     // the search began, so it never lingers on a word the
                     // pattern only partially matches.
-                    view.update_live_search(&self.bar.get_text(), origin);
+                    view.update_live_search(&pattern, self.origin);
                 }
                 None
             }
@@ -190,8 +188,10 @@ impl PromptSession {
         // reacting to it.
         let dismissed = matches!(resolution, PromptResolution::Cancelled);
         self.purpose.apply(view, resolution);
-        if dismissed && let Some(origin) = self.find_origin {
-            view.set_location_and_scroll(origin);
+        // Dismissing a find prompt restores the caret where the search
+        // began and scrolls it into view.
+        if dismissed && self.purpose == PromptPurpose::Find {
+            view.set_location_and_scroll(self.origin);
         }
     }
 
@@ -201,7 +201,7 @@ impl PromptSession {
     /// While a find prompt is open and its pattern matches nothing, the
     /// bar shows "(No matches)" right of the typed text; an empty pattern
     /// is no search yet, so it shows nothing.
-    pub fn render(&mut self, view: &View) -> Position {
+    pub fn render(&self, view: &View) -> Position {
         self.bar.render(self.no_match_note(view));
         self.bar.get_caret_position()
     }

@@ -61,10 +61,9 @@ impl Line {
         }
     }
 
-    /// The line's raw text, ready for byte-wise operations such as
-    /// `str::find`.
-    pub fn text(&self) -> &str {
-        &self.text
+    /// A line holding the single character `c`.
+    pub fn from_char(c: char) -> Self {
+        Self::from(&c.to_string())
     }
 
     /// The grapheme at `grapheme_index` as a slice of the line's text:
@@ -285,7 +284,11 @@ impl Line {
                 };
 
                 let replacement = Self::replacement_character(grapheme);
-                TextFragment::from(byte_index, rendered_width, replacement)
+                TextFragment {
+                    byte_index,
+                    rendered_width,
+                    replacement,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -323,7 +326,11 @@ impl Line {
                     GraphemeWidth::Half
                 };
                 let replacement = Self::replacement_character(range);
-                merged.push(TextFragment::from(first, rendered_width, replacement));
+                merged.push(TextFragment {
+                    byte_index: first,
+                    rendered_width,
+                    replacement,
+                });
             } else {
                 merged.push(fragments[start].clone());
             }
@@ -443,11 +450,7 @@ impl Line {
         self.fragments
             .iter()
             .take(grapheme_index)
-            .map(|fragment| match fragment.rendered_width {
-                GraphemeWidth::Half => 1,
-                GraphemeWidth::Full => 2,
-                GraphemeWidth::Tab => TAB_WIDTH_SPACES,
-            })
+            .map(|fragment| fragment.rendered_width.columns())
             .sum()
     }
 
@@ -971,11 +974,9 @@ mod tests {
     }
 
     #[test]
-    fn text_returns_the_verbatim_line_content() {
+    fn display_writes_the_verbatim_line_content() {
         let line = Line::from("café");
-        assert_eq!(line.text(), "café");
-        // Display writes the same verbatim text.
-        assert_eq!(line.to_string(), line.text());
+        assert_eq!(line.to_string(), "café");
     }
 
     #[test]
@@ -1135,7 +1136,7 @@ mod tests {
     fn insert_char_shifts_the_byte_indices_of_the_following_fragments() {
         let mut line = Line::from("ab");
         line.insert_char(1, 'X');
-        assert_eq!(line.text(), "aXb");
+        assert_eq!(line.to_string(), "aXb");
         assert_eq!(byte_indices(&line), vec![0, 1, 2]);
     }
 
@@ -1143,7 +1144,7 @@ mod tests {
     fn insert_multibyte_char_shifts_byte_indices_by_its_utf8_length() {
         let mut line = Line::from("ab");
         line.insert_char(1, 'é');
-        assert_eq!(line.text(), "aéb");
+        assert_eq!(line.to_string(), "aéb");
         // 'a' (1 byte) + 'é' (2 bytes) → 'b' starts at byte 3.
         assert_eq!(line.fragments[2].byte_index, 3);
     }
@@ -1152,7 +1153,7 @@ mod tests {
     fn insert_char_at_end_extends_the_text() {
         let mut line = Line::from("café");
         line.insert_char(4, 'x');
-        assert_eq!(line.text(), "caféx");
+        assert_eq!(line.to_string(), "caféx");
         assert_eq!(line.fragments[4].byte_index, 5);
     }
 
@@ -1160,7 +1161,7 @@ mod tests {
     fn delete_grapheme_rebases_the_byte_indices_after_the_gap() {
         let mut line = Line::from("café");
         line.delete_grapheme(0); // remove 'c'
-        assert_eq!(line.text(), "afé");
+        assert_eq!(line.to_string(), "afé");
         assert_eq!(byte_indices(&line), vec![0, 1, 2]);
     }
 
@@ -1168,8 +1169,8 @@ mod tests {
     fn split_at_keeps_byte_indices_consistent_in_both_halves() {
         let mut line = Line::from("café");
         let after = line.split_at(2);
-        assert_eq!(line.text(), "ca");
-        assert_eq!(after.text(), "fé");
+        assert_eq!(line.to_string(), "ca");
+        assert_eq!(after.to_string(), "fé");
         assert_eq!(line.fragments[1].byte_index, 1);
         assert_eq!(after.fragments[1].byte_index, 1); // 'é' inside "fé"
     }
@@ -1178,7 +1179,7 @@ mod tests {
     fn appending_a_line_keeps_byte_indices_consistent() {
         let mut line = Line::from("ca");
         line.append(&Line::from("fé"));
-        assert_eq!(line.text(), "café");
+        assert_eq!(line.to_string(), "café");
         assert_eq!(byte_indices(&line), vec![0, 1, 2, 3]);
     }
 
@@ -1186,7 +1187,7 @@ mod tests {
     fn appending_to_an_empty_line_yields_the_other_line() {
         let mut line = Line::from("");
         line.append(&Line::from("fé"));
-        assert_eq!(line.text(), "fé");
+        assert_eq!(line.to_string(), "fé");
         assert_eq!(line.grapheme_count(), 2);
         assert_eq!(byte_indices(&line), vec![0, 1]);
     }
@@ -1195,7 +1196,7 @@ mod tests {
     fn inserting_a_combining_mark_joins_the_previous_grapheme() {
         let mut line = Line::from("cafe");
         line.insert_char(3, '\u{301}'); // acute accent after 'f'
-        assert_eq!(line.text(), "caf\u{301}e");
+        assert_eq!(line.to_string(), "caf\u{301}e");
         // 'f' and the combining mark form one grapheme at byte 2.
         assert_eq!(line.grapheme_count(), 4);
         assert_eq!(line.grapheme_text(2), "f\u{301}");
@@ -1208,7 +1209,7 @@ mod tests {
         let mut line = Line::from("caf\u{301}e");
         // 'f' + combining mark is a single grapheme at index 2.
         line.delete_grapheme(2);
-        assert_eq!(line.text(), "cae");
+        assert_eq!(line.to_string(), "cae");
         assert_eq!(line.grapheme_count(), 3);
         assert_eq!(byte_indices(&line), vec![0, 1, 2]);
     }
@@ -1217,7 +1218,7 @@ mod tests {
     fn inserting_a_zwj_joins_the_neighbouring_emoji() {
         let mut line = Line::from("👍🎉");
         line.insert_char(1, '\u{200d}');
-        assert_eq!(line.text(), "👍\u{200d}🎉");
+        assert_eq!(line.to_string(), "👍\u{200d}🎉");
         // The ZWJ joins the two emoji into one merged fragment.
         assert_eq!(line.grapheme_count(), 1);
         assert_eq!(line.fragments[0].byte_index, 0);
