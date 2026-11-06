@@ -1,25 +1,12 @@
 use crate::common::{
     constants::TAB_WIDTH_SPACES,
+    style::{Style, LineStyle},
     textfragment::{GraphemeWidth, TextFragment},
 };
 use std::fmt;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-
-/// How a display segment of a line is highlighted, if at all. The view
-/// renders each kind differently: plain segments in the terminal's
-/// default colors, search matches in the match highlight, and the active
-/// match — the one the caret sits on — in its own, stronger highlight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SegmentHighlight {
-    /// No highlight: drawn with the terminal's default colors.
-    None,
-    /// A search match that is not the active one.
-    Match,
-    /// The active search match, where the caret sits.
-    Active,
-}
 
 /// A single line of a buffer.
 ///
@@ -83,6 +70,35 @@ impl Line {
             Some(replacement) => replacement.as_str(),
             None => self.grapheme_text(grapheme_index),
         }
+    }
+
+    /// Whether the grapheme at `grapheme_index` is a digit: one or more
+    /// ASCII digits, so a multi-char cluster like a keycap emoji is not.
+    fn is_digit(&self, grapheme_index: usize) -> bool {
+        self.display_text_of(grapheme_index)
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    }
+
+    /// The grapheme spans of the line's runs of digits: each span covers
+    /// one or more consecutive digit graphemes, in the order they occur
+    /// in the line. The line knows which of its graphemes are digits; the
+    /// styling of those spans is decided by the structure that owns the
+    /// buffer's styling.
+    pub fn digit_spans(&self) -> Vec<Range<usize>> {
+        let mut spans = Vec::new();
+        let mut run_start: Option<usize> = None;
+        for index in 0..self.fragments.len() {
+            if self.is_digit(index) {
+                run_start.get_or_insert(index);
+            } else if let Some(start) = run_start.take() {
+                spans.push(start..index);
+            }
+        }
+        if let Some(start) = run_start {
+            spans.push(start..self.fragments.len());
+        }
+        spans
     }
 
     /// Appends the content of `other` to this line, keeping this line's existing content first.
@@ -355,31 +371,31 @@ impl Line {
     // draws its segments directly via [`Line::display_segments`].
     #[allow(dead_code)]
     pub fn get(&self, range: &Range<usize>) -> String {
-        self.display_segments(range, None, None)
+        self.display_segments(range, &LineStyle::new())
             .into_iter()
             .map(|(text, _)| text)
             .collect()
     }
 
     /// The visible portion of the line as display segments: the same
-    /// truncation and ellipses as [`Line::get`], but with the graphemes of
-    /// the open search marked so the caller can render them differently.
-    /// A grapheme covered by `active` — the grapheme span of the active
-    /// match, where the caret sits — is [`SegmentHighlight::Active`], a
-    /// grapheme covered by any span of `matches` — the grapheme spans of
-    /// the line's occurrences of the search pattern — is
-    /// [`SegmentHighlight::Match`], and every other grapheme is
-    /// [`SegmentHighlight::None`].
+    /// truncation and ellipses as [`Line::get`], but each segment also
+    /// carries the style its graphemes carry in `style` — the line's
+    /// styling information, resolved grapheme by grapheme.
+    ///
+    /// `style` is the line's share of the buffer's styling: the
+    /// structure that owns it stores the styling per line and hands it
+    /// to the line when the line builds its annotated string, so this
+    /// method only resolves and merges — it knows nothing about what
+    /// produced the styling.
     ///
     /// A grapheme straddling an edge of `range` is not drawn; an ellipsis
     /// marks each edge that hides content.
     pub fn display_segments(
         &self,
         range: &Range<usize>,
-        matches: Option<&[Range<usize>]>,
-        active: Option<&Range<usize>>,
-    ) -> Vec<(String, SegmentHighlight)> {
-        let mut segments: Vec<(String, SegmentHighlight)> = Vec::new();
+        style: &LineStyle,
+    ) -> Vec<(String, Style)> {
+        let mut segments: Vec<(String, Style)> = Vec::new();
         if self.fragments.is_empty() {
             return segments;
         }
@@ -399,26 +415,19 @@ impl Line {
             && self.width_until(idx.saturating_sub(1)) < range.start
             && self.width_until(idx) > range.start
         {
-            segments.push((String::from('…'), SegmentHighlight::None));
+            segments.push((String::from('…'), Style::None));
         }
 
-        // Add graphemes within the visible range, marking the ones a
-        // search highlight covers (the active match takes precedence over
-        // a plain match); consecutive graphemes with the same marking
-        // join one segment.
+        // Add graphemes within the visible range, resolving each
+        // grapheme's style from the line's styling information;
+        // consecutive graphemes with the same style join one segment.
         while idx < self.fragments.len() && self.width_until(idx.saturating_add(1)) <= range.end {
-            let highlight = if active.is_some_and(|h| h.contains(&idx)) {
-                SegmentHighlight::Active
-            } else if matches.is_some_and(|m| m.iter().any(|h| h.contains(&idx))) {
-                SegmentHighlight::Match
-            } else {
-                SegmentHighlight::None
-            };
+            let grapheme_style = style.at(idx);
             match segments.last_mut() {
-                Some((text, marked)) if *marked == highlight => {
+                Some((text, marked)) if *marked == grapheme_style => {
                     text.push_str(self.display_text_of(idx));
                 }
-                _ => segments.push((self.display_text_of(idx).to_string(), highlight)),
+                _ => segments.push((self.display_text_of(idx).to_string(), grapheme_style)),
             }
             idx = idx.saturating_add(1);
         }
@@ -427,7 +436,7 @@ impl Line {
         // range cut off content, whether it straddled the edge or starts
         // past it.
         if idx < self.fragments.len() {
-            segments.push((String::from('…'), SegmentHighlight::None));
+            segments.push((String::from('…'), Style::None));
         }
 
         segments
@@ -473,9 +482,39 @@ impl Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::style::Styles;
 
     fn byte_indices(line: &Line) -> Vec<usize> {
         line.fragments.iter().map(|f| f.byte_index).collect()
+    }
+
+    /// The base styling of `line` — its digit spans — as stored by the
+    /// structure that owns the buffer's styling.
+    fn base_style(line: &Line) -> LineStyle {
+        Styles::for_lines(std::slice::from_ref(line))
+            .line(0)
+            .expect("the slice has the line")
+            .clone()
+    }
+
+    /// The styling of `line` with the given match and active spans
+    /// layered over its base styling: the same layering the view applies
+    /// when it composes a line's styling for rendering.
+    fn layered(
+        line: &Line,
+        matches: Option<&[Range<usize>]>,
+        active: Option<Range<usize>>,
+    ) -> LineStyle {
+        let mut style = base_style(line);
+        if let Some(spans) = matches {
+            for span in spans {
+                style.add(span.clone(), Style::Match);
+            }
+        }
+        if let Some(span) = active {
+            style.add(span, Style::Active);
+        }
+        style
     }
 
     #[test]
@@ -752,7 +791,7 @@ mod tests {
         assert_eq!(line.get(&(0..6)), "abcdef");
     }
 
-    fn segments_as_pairs(segments: &[(String, SegmentHighlight)]) -> Vec<(&str, SegmentHighlight)> {
+    fn segments_as_pairs(segments: &[(String, Style)]) -> Vec<(&str, Style)> {
         segments
             .iter()
             .map(|(text, hl)| (text.as_str(), *hl))
@@ -760,28 +799,25 @@ mod tests {
     }
 
     #[test]
-    fn display_segments_without_search_highlights_match_get() {
+    fn display_segments_without_any_style_match_get() {
         let line = Line::from("abcdef");
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(1..7), None, None)),
-            vec![("bcdef", SegmentHighlight::None)]
+            segments_as_pairs(&line.display_segments(&(1..7), &LineStyle::new())),
+            vec![("bcdef", Style::None)]
         );
         // A straddling grapheme at the left edge is elided; the ellipsis
         // joins the unmarked text that follows it.
         let wide = Line::from("ab中cde");
         assert_eq!(
-            segments_as_pairs(&wide.display_segments(&(3..10), None, None)),
-            vec![("…cde", SegmentHighlight::None)]
+            segments_as_pairs(&wide.display_segments(&(3..10), &LineStyle::new())),
+            vec![("…cde", Style::None)]
         );
         // 中 starts exactly at column 2: no left ellipsis; d starts
         // exactly at column 5: hidden, elided. The right ellipsis stays
         // its own segment.
         assert_eq!(
-            segments_as_pairs(&wide.display_segments(&(2..5), None, None)),
-            vec![
-                ("中c", SegmentHighlight::None),
-                ("…", SegmentHighlight::None)
-            ]
+            segments_as_pairs(&wide.display_segments(&(2..5), &LineStyle::new())),
+            vec![("中c", Style::None), ("…", Style::None)]
         );
     }
 
@@ -792,26 +828,17 @@ mod tests {
         let hello = 0..5;
         let rld = 8..100;
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&[world]), None)),
-            vec![
-                ("hello ", SegmentHighlight::None),
-                ("world", SegmentHighlight::Match)
-            ]
+            segments_as_pairs(&line.display_segments(&(0..20), &layered(&line, Some(&[world]), None))),
+            vec![("hello ", Style::None), ("world", Style::Match)]
         );
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&[hello]), None)),
-            vec![
-                ("hello", SegmentHighlight::Match),
-                (" world", SegmentHighlight::None)
-            ]
+            segments_as_pairs(&line.display_segments(&(0..20), &layered(&line, Some(&[hello]), None))),
+            vec![("hello", Style::Match), (" world", Style::None)]
         );
         // A match past the end of the line marks what it covers.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&[rld]), None)),
-            vec![
-                ("hello wo", SegmentHighlight::None),
-                ("rld", SegmentHighlight::Match)
-            ]
+            segments_as_pairs(&line.display_segments(&(0..20), &layered(&line, Some(&[rld]), None))),
+            vec![("hello wo", Style::None), ("rld", Style::Match)]
         );
     }
 
@@ -819,11 +846,14 @@ mod tests {
     fn display_segments_marks_every_match_of_the_line() {
         let line = Line::from("hello world hello");
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(0..20), Some(&[0..5, 12..17]), None)),
+            segments_as_pairs(&line.display_segments(
+                &(0..20),
+                &layered(&line, Some(&[0..5, 12..17]), None)
+            )),
             vec![
-                ("hello", SegmentHighlight::Match),
-                (" world ", SegmentHighlight::None),
-                ("hello", SegmentHighlight::Match)
+                ("hello", Style::Match),
+                (" world ", Style::None),
+                ("hello", Style::Match)
             ]
         );
     }
@@ -836,22 +866,45 @@ mod tests {
         assert_eq!(
             segments_as_pairs(&line.display_segments(
                 &(0..20),
-                Some(&[0..5, 12..17]),
-                Some(&(12..17))
+                &layered(&line, Some(&[0..5, 12..17]), Some(12..17))
             )),
             vec![
-                ("hello", SegmentHighlight::Match),
-                (" world ", SegmentHighlight::None),
-                ("hello", SegmentHighlight::Active)
+                ("hello", Style::Match),
+                (" world ", Style::None),
+                ("hello", Style::Active)
             ]
         );
         // An active match without other matches marks only itself.
         let other = Line::from("hello world");
         assert_eq!(
-            segments_as_pairs(&other.display_segments(&(0..20), None, Some(&(6..11)))),
+            segments_as_pairs(&other.display_segments(&(0..20), &layered(&other, None, Some(6..11)))),
+            vec![("hello ", Style::None), ("world", Style::Active)]
+        );
+    }
+
+    #[test]
+    fn display_segments_marks_digits() {
+        let line = Line::from("abc 123 def");
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), &base_style(&line))),
             vec![
-                ("hello ", SegmentHighlight::None),
-                ("world", SegmentHighlight::Active)
+                ("abc ", Style::None),
+                ("123", Style::Digit),
+                (" def", Style::None)
+            ]
+        );
+    }
+
+    #[test]
+    fn display_segments_marks_a_search_match_over_digits() {
+        let line = Line::from("123 456");
+        let digits = 0..3;
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), &layered(&line, Some(&[digits]), None))),
+            vec![
+                ("123", Style::Match),
+                (" ", Style::None),
+                ("456", Style::Digit)
             ]
         );
     }
@@ -866,38 +919,64 @@ mod tests {
         // The window [3..9) shows "lo wor": the match 6..11 reaches
         // only w, o, r before the ellipsis cuts the rest.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..9), Some(&[world]), None)),
+            segments_as_pairs(&line.display_segments(&(3..9), &layered(&line, Some(&[world]), None))),
             vec![
-                ("lo ", SegmentHighlight::None),
-                ("wor", SegmentHighlight::Match),
-                ("…", SegmentHighlight::None)
+                ("lo ", Style::None),
+                ("wor", Style::Match),
+                ("…", Style::None)
             ]
         );
         // A match that starts left of the window is clipped at it:
         // it still covers l, o, space and w, which are visible.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..20), Some(&[head]), None)),
-            vec![
-                ("lo w", SegmentHighlight::Match),
-                ("orld", SegmentHighlight::None)
-            ]
+            segments_as_pairs(&line.display_segments(&(3..20), &layered(&line, Some(&[head]), None))),
+            vec![("lo w", Style::Match), ("orld", Style::None)]
         );
         // A match fully outside the window leaves every segment plain.
         assert_eq!(
-            segments_as_pairs(&line.display_segments(&(3..9), Some(&[outside]), None)),
-            vec![
-                ("lo wor", SegmentHighlight::None),
-                ("…", SegmentHighlight::None)
-            ]
+            segments_as_pairs(&line.display_segments(&(3..9), &layered(&line, Some(&[outside]), None))),
+            vec![("lo wor", Style::None), ("…", Style::None)]
         );
     }
 
     #[test]
     fn display_segments_of_an_empty_line_is_empty() {
         assert_eq!(
-            Line::from("").display_segments(&(0..10), None, None),
-            Vec::<(String, SegmentHighlight)>::new()
+            Line::from("").display_segments(&(0..10), &LineStyle::new()),
+            Vec::<(String, Style)>::new()
         );
+    }
+
+    #[test]
+    fn digit_spans_cover_each_run_of_digits() {
+        let line = Line::from("abc 123 def 42");
+        assert_eq!(line.digit_spans(), vec![4..7, 12..14]);
+    }
+
+    #[test]
+    fn digit_spans_of_a_line_without_digits_is_empty() {
+        let line = Line::from("abc def");
+        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn digit_spans_of_an_empty_line_is_empty() {
+        let line = Line::from("");
+        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn digit_spans_split_on_non_digit_graphemes() {
+        let line = Line::from("1a2b3");
+        assert_eq!(line.digit_spans(), vec![0..1, 2..3, 4..5]);
+    }
+
+    #[test]
+    fn digit_spans_do_not_count_a_keycap_emoji_as_a_digit() {
+        // A keycap is a digit plus a combining enclosing keycap: one
+        // multi-char grapheme cluster, so it is not a digit.
+        let line = Line::from("5\u{20e3}");
+        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
     }
 
     #[test]

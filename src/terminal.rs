@@ -159,6 +159,24 @@ impl Terminal {
         Ok(())
     }
 
+    /// Prints a digit at the cursor's current position in soft
+    /// steel-blue text, with no background, continuing the row rather
+    /// than rewriting it. The cool blue stays distinct from the warm
+    /// grays of the search highlights.
+    pub fn print_digit(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 120,
+                g: 150,
+                b: 200,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a search match at the cursor's current position: black text
     /// on a warm mid-gray background, continuing the row rather than
     /// rewriting it. The warm gray carries a subtle yellow tinge, bright

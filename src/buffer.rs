@@ -1,10 +1,13 @@
-use crate::common::{line::Line, types::Location};
+use crate::common::{line::Line, style::Styles, types::Location};
 use std::fs::{File, read_to_string};
 use std::io::Write;
 
 #[derive(Clone, Default)]
 pub struct Buffer {
     pub lines: Vec<Line>,
+    /// The styling of `lines`: one entry per line, kept in parallel
+    /// with them, and updated whenever a line's text or position changes.
+    pub styles: Styles,
     /// True when the buffer content differs from what is on disk (unsaved changes).
     pub modified: bool,
     /// The path of the file this buffer was loaded from, if any.
@@ -102,6 +105,7 @@ impl Buffer {
         let lines: Vec<Line> = file_content.lines().map(Line::from).collect();
 
         Ok(Self {
+            styles: Styles::for_lines(&lines),
             lines,
             modified: false,
             file_name: Some(file_path.to_string()),
@@ -137,9 +141,13 @@ impl Buffer {
     /// Inserts character `c` at column `location.x` on row `location.y`. Creates a new line if the row exceeds the buffer length.
     pub fn insert_char(&mut self, location: Location, c: char) {
         if location.y >= self.lines.len() {
-            self.lines.push(Line::from_char(c));
+            let line = Line::from_char(c);
+            self.styles.insert_line(self.lines.len(), &line);
+            self.lines.push(line);
         } else {
             self.lines[location.y].insert_char(location.x, c);
+            self.styles
+                .refresh_line(location.y, &self.lines[location.y]);
         }
         self.modified = true;
     }
@@ -158,7 +166,9 @@ impl Buffer {
         // the caret on it.
         if location.y >= self.lines.len() {
             let new_line_index = self.lines.len();
-            self.lines.push(Line::newline());
+            let new_line = Line::newline();
+            self.styles.insert_line(new_line_index, &new_line);
+            self.lines.push(new_line);
             self.modified = true;
             return Location {
                 x: 0,
@@ -170,8 +180,13 @@ impl Buffer {
         // simply appends an empty line below it.
         let index = location.x.min(self.lines[location.y].grapheme_count());
         let after_caret = self.lines[location.y].split_at(index);
+        // The split line's text changed, so its styling is rebuilt.
+        self.styles
+            .refresh_line(location.y, &self.lines[location.y]);
         let new_line_index = location.y.saturating_add(1);
         self.lines.insert(new_line_index, after_caret);
+        self.styles
+            .insert_line(new_line_index, &self.lines[new_line_index]);
         self.modified = true;
 
         Location {
@@ -182,8 +197,10 @@ impl Buffer {
 
     /// Deletes the grapheme cluster at column `location.x` on row `location.y`.
     pub fn delete(&mut self, location: Location) {
-        if let Some(line) = self.lines.get_mut(location.y) {
-            line.delete_grapheme(location.x);
+        if self.lines.get(location.y).is_some() {
+            self.lines[location.y].delete_grapheme(location.x);
+            self.styles
+                .refresh_line(location.y, &self.lines[location.y]);
             self.modified = true;
         }
     }
@@ -199,6 +216,11 @@ impl Buffer {
         }
         let source = self.lines.remove(source_index);
         self.lines[target_index].append(&source);
+        // The same operations on the styling, in the same order, so the
+        // two structures stay in parallel.
+        self.styles.remove_line(source_index);
+        self.styles
+            .refresh_line(target_index, &self.lines[target_index]);
         self.modified = true;
     }
 }
@@ -209,8 +231,10 @@ mod tests {
     use crate::common::types::Location;
 
     fn make_buffer(lines_data: &[&str]) -> Buffer {
+        let lines: Vec<Line> = lines_data.iter().copied().map(Line::from).collect();
         Buffer {
-            lines: lines_data.iter().copied().map(Line::from).collect(),
+            styles: Styles::for_lines(&lines),
+            lines,
             modified: false,
             file_name: None,
         }

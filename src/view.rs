@@ -2,7 +2,8 @@ use crate::buffer::Buffer;
 use crate::common::constants::{
     DEFAULT_MESSAGE_DURATION, LONG_MESSAGE_DURATION, RESERVED_BOTTOM_LINES,
 };
-use crate::common::line::{Line, SegmentHighlight};
+use crate::common::line::Line;
+use crate::common::style::{Style, LineStyle};
 use crate::common::types::Location;
 use crate::editorcommand::{Direction, EditorCommand};
 use crate::messagebar::{MessageBar, MessageState};
@@ -199,18 +200,12 @@ impl View {
             if let Some(line) = self.buffer.lines.get(buffer_row) {
                 let left = self.scroll_offset.col;
                 let right = self.scroll_offset.col.saturating_add(width);
-                let matches = self.line_match_spans(line);
                 let row_active = active
                     .as_ref()
                     .filter(|(row, _)| *row == buffer_row)
-                    .map(|(_, span)| span);
-                Self::render_buffer_row(
-                    current_row,
-                    line,
-                    &(left..right),
-                    matches.as_deref(),
-                    row_active,
-                );
+                    .map(|(_, span)| span.clone());
+                let style = self.line_style(line, buffer_row, row_active);
+                Self::render_buffer_row(current_row, line, &(left..right), &style);
             } else {
                 Self::render_line(current_row, "~");
             }
@@ -221,30 +216,51 @@ impl View {
         }
     }
 
+    /// The styling information with which `line` is drawn on
+    /// `buffer_row`: the line's stored styling — its digits, and the
+    /// syntax coloring as it is added — with the open search's
+    /// highlights layered on top: a match over every occurrence of the
+    /// pattern on the line, and the active match over `active`, the
+    /// occurrence the caret sits on, when it is on this row.
+    fn line_style(&self, line: &Line, buffer_row: usize, active: Option<Range<usize>>) -> LineStyle {
+        let mut style = self
+            .buffer
+            .styles
+            .line(buffer_row)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(matches) = self.line_match_spans(line) {
+            for span in matches {
+                style.add(span, Style::Match);
+            }
+        }
+        if let Some(span) = active {
+            style.add(span, Style::Active);
+        }
+        style
+    }
+
     /// Draws one buffer row: the line's visible portion as display
-    /// segments, each drawn according to its highlight — plain, in the
-    /// match highlight where a span of `matches` covers it, and in the
-    /// stronger active-match highlight where `active` covers it.
-    fn render_buffer_row(
-        row: usize,
-        line: &Line,
-        range: &Range<usize>,
-        matches: Option<&[Range<usize>]>,
-        active: Option<&Range<usize>>,
-    ) {
+    /// segments, each drawn according to the style its graphemes carry
+    /// in `style` — plain, in the digit color, in the match highlight,
+    /// or in the stronger active-match highlight.
+    fn render_buffer_row(row: usize, line: &Line, range: &Range<usize>, style: &LineStyle) {
         // `clear_row` keeps the cursor's column; the segments must start
         // at the row's beginning.
         let _ = Terminal::move_cursor_to(0, row);
-        for (text, highlight) in line.display_segments(range, matches, active) {
-            match highlight {
-                SegmentHighlight::None => {
+        for (text, style) in line.display_segments(range, style) {
+            match style {
+                Style::None => {
                     let _ = Terminal::print(&text);
                 }
-                SegmentHighlight::Match => {
+                Style::Match => {
                     let _ = Terminal::print_match(&text);
                 }
-                SegmentHighlight::Active => {
+                Style::Active => {
                     let _ = Terminal::print_active_match(&text);
+                }
+                Style::Digit => {
+                    let _ = Terminal::print_digit(&text);
                 }
             }
         }
@@ -725,8 +741,10 @@ mod tests {
     use std::time::Duration;
 
     fn make_view(lines_data: &[&str]) -> View {
+        let lines: Vec<Line> = lines_data.iter().copied().map(Line::from).collect();
         let buffer = Buffer {
-            lines: lines_data.iter().copied().map(Line::from).collect(),
+            styles: crate::common::style::Styles::for_lines(&lines),
+            lines,
             modified: true,
             file_name: None,
         };
