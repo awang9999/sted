@@ -1,5 +1,6 @@
 use crate::common::display::fit_to_width;
 use crate::common::layout::{BarLayout, STATUS_BAR_OFFSET};
+use crate::common::types::FileType;
 use crate::terminal::{Size, Terminal};
 use unicode_width::UnicodeWidthStr;
 
@@ -12,6 +13,7 @@ const FILE_NAME_WIDTH: usize = 50;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DocumentStatus {
     pub file_name: Option<String>,
+    pub file_type: FileType,
     pub total_lines: usize,
     /// Zero-based index of the line the caret is currently on.
     pub current_line: usize,
@@ -20,25 +22,36 @@ pub struct DocumentStatus {
 
 impl DocumentStatus {
     fn as_line(&self, width: usize) -> String {
-        let file = fit_to_width(
-            self.file_name.as_deref().unwrap_or(NO_FILE),
-            FILE_NAME_WIDTH,
-        );
         let state = if self.is_modified {
             "modified"
         } else {
             "unmodified"
         };
-        let line_frac = format!(
-            "{}/{}",
-            self.current_line.saturating_add(1),
-            self.total_lines
+        // The position indicator, prefixed with the file type's label,
+        // e.g. `Rust | 16/417`.
+        let position = format!(
+            "{file_type} | {line}/{total}",
+            file_type = self.file_type,
+            line = self.current_line.saturating_add(1),
+            total = self.total_lines
         );
         let middle = format!(" - {} lines | ({state})", self.total_lines);
+        // Budget the file name's columns so a long name is truncated
+        // instead of pushing the position indicator off the bar. The
+        // line is exactly `width` columns unless the terminal is too
+        // narrow for the mandatory middle and position segments, in
+        // which case the file name is dropped entirely.
+        let file_budget = width
+            .saturating_sub(middle.width())
+            .saturating_sub(position.width());
+        let file = fit_to_width(
+            self.file_name.as_deref().unwrap_or(NO_FILE),
+            file_budget.min(FILE_NAME_WIDTH),
+        );
         let align_width = width
             .saturating_sub(middle.width())
             .saturating_sub(file.width());
-        format!("{file}{middle}{line_frac:>align_width$}")
+        format!("{file}{middle}{position:>align_width$}")
     }
 }
 
@@ -101,6 +114,22 @@ mod tests {
     fn status(file: Option<&str>, lines: usize, line: usize, modified: bool) -> DocumentStatus {
         DocumentStatus {
             file_name: file.map(str::to_string),
+            file_type: FileType::PlainText,
+            total_lines: lines,
+            current_line: line,
+            is_modified: modified,
+        }
+    }
+
+    fn rust_status(
+        file: Option<&str>,
+        lines: usize,
+        line: usize,
+        modified: bool,
+    ) -> DocumentStatus {
+        DocumentStatus {
+            file_name: file.map(str::to_string),
+            file_type: FileType::Rust,
             total_lines: lines,
             current_line: line,
             is_modified: modified,
@@ -172,6 +201,27 @@ mod tests {
     fn rendered_line_is_padded_to_the_width() {
         let line = status(Some("file.txt"), 5, 2, true).as_line(80);
         assert_eq!(line.width(), 80);
+    }
+
+    #[test]
+    fn rendered_line_shows_rust_next_to_the_position_indicator() {
+        let line = rust_status(Some("main.rs"), 417, 15, false).as_line(80);
+        assert!(line.contains("Rust | 16/417"));
+        assert_eq!(line.width(), 80);
+    }
+
+    #[test]
+    fn rendered_line_shows_text_next_to_the_position_indicator_for_plain_text() {
+        let line = status(Some("notes.txt"), 5, 2, true).as_line(80);
+        assert!(line.contains("Text | 3/5"));
+        assert_eq!(line.width(), 80);
+    }
+
+    #[test]
+    fn long_file_names_do_not_push_the_position_off_screen() {
+        let line = rust_status(Some(&"a".repeat(45)), 417, 15, false).as_line(80);
+        assert_eq!(line.width(), 80);
+        assert!(line.ends_with("Rust | 16/417"));
     }
 
     #[test]

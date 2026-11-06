@@ -68,6 +68,7 @@ impl View {
     pub fn get_status(&self) -> DocumentStatus {
         DocumentStatus {
             file_name: self.buffer.file_name.clone(),
+            file_type: self.buffer.file_type,
             total_lines: self.buffer.lines.len(),
             current_line: self.location.y,
             is_modified: self.buffer.modified,
@@ -738,6 +739,7 @@ mod tests {
     use super::*;
     use crate::common::constants::{LONG_MESSAGE_DURATION, TAB_WIDTH_SPACES};
     use crate::common::line::Line;
+    use crate::common::types::FileType;
     use std::time::Duration;
 
     fn make_view(lines_data: &[&str]) -> View {
@@ -747,6 +749,7 @@ mod tests {
             lines,
             modified: true,
             file_name: None,
+            file_type: FileType::PlainText,
         };
         let terminal_size = Terminal::size().unwrap_or(Size {
             height: 24,
@@ -849,6 +852,21 @@ mod tests {
         assert_eq!(view.buffer.file_name.as_deref(), Some(file_path.as_str()));
         assert!(!view.buffer.modified);
         assert!(path.exists());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_as_to_a_rust_file_updates_the_file_type() {
+        let path =
+            std::env::temp_dir().join(format!("sted_view_save_as_rs_{}.rs", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["hello"]);
+        view.save_as(&file_path);
+
+        assert_eq!(view.buffer.file_type, FileType::Rust);
+        assert_eq!(view.get_status().file_type, FileType::Rust);
 
         let _ = std::fs::remove_file(&path);
     }

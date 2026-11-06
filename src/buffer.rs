@@ -1,6 +1,7 @@
-use crate::common::{line::Line, style::Styles, types::Location};
+use crate::common::{line::Line, style::Styles, types::{FileType, Location}};
 use std::fs::{File, read_to_string};
 use std::io::Write;
+use std::path::Path;
 
 #[derive(Clone, Default)]
 pub struct Buffer {
@@ -13,6 +14,9 @@ pub struct Buffer {
     /// The path of the file this buffer was loaded from, if any.
     /// `None` means the buffer is a new, unsaved document.
     pub file_name: Option<String>,
+    /// The type of the buffer's file, detected from the file name: `Rust`
+    /// for names ending in `.rs`, `PlainText` for everything else.
+    pub file_type: FileType,
 }
 
 impl Buffer {
@@ -109,6 +113,7 @@ impl Buffer {
             lines,
             modified: false,
             file_name: Some(file_path.to_string()),
+            file_type: FileType::from_path(Path::new(file_path)),
         })
     }
 
@@ -116,6 +121,10 @@ impl Buffer {
     /// Returns an error if the buffer has no file name (e.g. it is a new document).
     pub fn save(&mut self) -> Result<(), std::io::Error> {
         if let Some(file_name) = &self.file_name {
+            // The file name decides how the file is treated: re-detect
+            // the type, so a document saved under a new name (a save-as)
+            // picks up the rules of its new extension.
+            self.file_type = FileType::from_path(Path::new(file_name));
             let mut file = File::create(file_name)?;
             for line in &self.lines {
                 // The line's Display writes its text verbatim, so saving
@@ -237,6 +246,7 @@ mod tests {
             lines,
             modified: false,
             file_name: None,
+            file_type: FileType::PlainText,
         }
     }
 
@@ -523,6 +533,34 @@ mod tests {
 
         let buf = Buffer::load(&file_path).expect("load should succeed");
         assert_eq!(buf.file_name.as_deref(), Some(file_path.as_str()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_detects_a_rust_file_from_its_extension() {
+        let path =
+            std::env::temp_dir().join(format!("sted_test_load_rs_{}.rs", std::process::id()));
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let buf = Buffer::load(&file_path).expect("load should succeed");
+        assert_eq!(buf.file_type, FileType::Rust);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_detects_plain_text_for_other_extensions() {
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_load_txt_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "hello\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let buf = Buffer::load(&file_path).expect("load should succeed");
+        assert_eq!(buf.file_type, FileType::PlainText);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -877,5 +915,31 @@ mod tests {
     fn save_without_file_name_is_an_error() {
         let mut buf = make_buffer(&["hello"]);
         assert!(buf.save().is_err());
+    }
+
+    #[test]
+    fn save_updates_the_file_type_to_match_the_file_name() {
+        // Load a text file, then save it under a `.rs` name (a save-as):
+        // the type follows the new extension.
+        let txt = std::env::temp_dir().join(format!(
+            "sted_test_retype_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&txt, "hello\n").unwrap();
+        let txt_path = txt.to_string_lossy().to_string();
+        let mut buf = Buffer::load(&txt_path).expect("load should succeed");
+        assert_eq!(buf.file_type, FileType::PlainText);
+
+        let rs = std::env::temp_dir().join(format!(
+            "sted_test_retype_{}.rs",
+            std::process::id()
+        ));
+        let rs_path = rs.to_string_lossy().to_string();
+        buf.file_name = Some(rs_path);
+        buf.save().expect("save should succeed");
+        assert_eq!(buf.file_type, FileType::Rust);
+
+        let _ = std::fs::remove_file(&txt);
+        let _ = std::fs::remove_file(&rs);
     }
 }
