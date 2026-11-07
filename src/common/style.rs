@@ -21,8 +21,9 @@ pub enum Style {
     Match,
     /// The active search match, where the caret sits.
     Active,
-    /// A number — an integer, a float, a scientific number, and the
-    /// same with underscore separators: drawn in the digit color.
+    /// A number — an integer, a float, a scientific number, a
+    /// hexadecimal, binary, or octal literal, and the same with
+    /// underscore separators: drawn in the digit color.
     Digit,
 }
 
@@ -117,9 +118,12 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// The syntax highlighter of a Rust source file: styles each number of
 /// a line with [`Style::Digit`]: an integer (a run of ASCII digits), a
 /// float (exactly one dot, not at the start or the end), a scientific
-/// number (an integer or a float, a lowercase `e`, then digits), and
-/// each of those with underscores as visual separators — a separator
-/// never at the start or the end of the number.
+/// number (an integer or a float, a lowercase `e`, then digits), a
+/// hexadecimal literal (`0x` or `0X`, then hex digits), a binary
+/// literal (`0b` or `0B`, then 0s and 1s), an octal literal (`0o` or
+/// `0O`, then 0-7), and each of those with underscores as visual
+/// separators — a separator never at the start or the end of the
+/// number.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -394,10 +398,10 @@ mod tests {
 
     #[test]
     fn for_lines_holds_one_style_per_line() {
-        let lines = [Line::from("a1"), Line::from("b2"), Line::from("c")];
+        let lines = [Line::from("1"), Line::from("2"), Line::from("c")];
         let styles = Styles::for_lines(FileType::Rust, &lines);
-        assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
-        assert_eq!(styles.line(1).unwrap().spans(), &[(1..2, Style::Digit)]);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(0..1, Style::Digit)]);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..1, Style::Digit)]);
         let no_spans: &[(Range<usize>, Style)] = &[];
         assert_eq!(styles.line(2).unwrap().spans(), no_spans);
         assert_eq!(styles.line(3), None);
@@ -405,23 +409,24 @@ mod tests {
 
     #[test]
     fn insert_line_places_the_base_styling_and_shifts_the_rest_down() {
-        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("a1")]);
-        let line = Line::from("b2");
+        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("1")]);
+        let line = Line::from("2");
         styles.insert_line(0, &line);
-        assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
-        assert_eq!(styles.line(1).unwrap().spans(), &[(1..2, Style::Digit)]);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(0..1, Style::Digit)]);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..1, Style::Digit)]);
         assert_eq!(styles.line(2), None);
     }
 
     #[test]
     fn remove_line_drops_the_styling_and_shifts_the_rest_up() {
-        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("a1"), Line::from("b2")]);
+        let mut styles =
+            Styles::for_lines(FileType::Rust, &[Line::from("1"), Line::from("2")]);
         styles.remove_line(0);
-        assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(0..1, Style::Digit)]);
         assert_eq!(styles.line(1), None);
         // Removing out of range is a no-op.
         styles.remove_line(5);
-        assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(0..1, Style::Digit)]);
     }
 
     #[test]
@@ -433,8 +438,9 @@ mod tests {
             &[(4..7, Style::Digit)]
         );
         // Editing the line's text rebuilds its styling, so the spans
-        // follow the digits to their new graphemes.
-        line.insert_char(0, 'x');
+        // follow the digits to their new graphemes. The z keeps the 5
+        // from joining the digits of 123 in one run.
+        line.insert_char(0, 'z');
         styles.refresh_line(0, &line);
         assert_eq!(
             styles.line(0).unwrap().spans(),
@@ -455,16 +461,62 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_highlighter_styles_each_integer() {
+    fn the_rust_highlighter_styles_each_number() {
         let highlighter = RustSyntaxHighlighter;
         assert_eq!(highlighter.file_type(), FileType::Rust);
-        // Only numbers are styled: the `0` and the `1` of the hex
-        // literal are separate integers, and the `x` and `f` are not
-        // number characters at all.
+        // Only numbers are styled: 42 is an integer, and 0x1f is one
+        // hexadecimal literal, not the integers 0 and 1.
         let line = Line::from("let x = 42; // 0x1f");
         assert_eq!(
             highlighter.base_style(&line).spans(),
-            &[(8..10, Style::Digit), (15..16, Style::Digit), (17..18, Style::Digit)]
+            &[(8..10, Style::Digit), (15..19, Style::Digit)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_hexadecimal_literals() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("a = 0xFF b = 0xdead");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(4..8, Style::Digit), (13..19, Style::Digit)]
+        );
+        // A bare prefix and a non-hex digit end the literal: 0x is not
+        // a number, and in 0x1G the run 0x1 is one.
+        let line = Line::from("c = 0x d = 0x1G");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(11..14, Style::Digit)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_binary_literals() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("a = 0b1010");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(4..10, Style::Digit)]
+        );
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("0b2")).spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_octal_literals() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("a = 0o755");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(4..9, Style::Digit)]
+        );
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("0o8")).spans(),
+            no_spans
         );
     }
 
@@ -570,9 +622,18 @@ mod tests {
             &[],
             &[],
             &[],
-            &[(3..6, Style::Digit)],
-            &[(0..1, Style::Digit), (2..3, Style::Digit)],
+            &[],
+            &[(0..4, Style::Digit)],
             &[(0..6, Style::Digit)],
+            &[(0..4, Style::Digit)],
+            &[(0..10, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[(0..6, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[],
+            &[(0..5, Style::Digit)],
+            &[],
         ];
         assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
         for (line, want) in lines.iter().zip(expected.iter().copied()) {

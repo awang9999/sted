@@ -73,30 +73,44 @@ impl Line {
     }
 
     /// Whether the grapheme at `grapheme_index` is one of the characters
-    /// a number may be built from: an ASCII digit, a dot, a lowercase
-    /// `e` (scientific notation), or an underscore (a visual separator).
-    /// A multi-char cluster like a keycap emoji is none of them.
+    /// a number may be built from: an ASCII digit, a hex digit (A-F,
+    /// a-f), a dot, a lowercase `e` (scientific notation), a literal
+    /// prefix letter (`x`, `b`, `o`, either case), or an underscore (a
+    /// visual separator). A multi-char cluster like a keycap emoji is
+    /// none of them.
     fn is_number_char(&self, grapheme_index: usize) -> bool {
         let text = self.display_text_of(grapheme_index);
         text.len() == 1
             && matches!(
                 text.chars().next(),
-                Some(c) if c.is_ascii_digit() || c == '.' || c == 'e' || c == '_'
+                Some(c)
+                    if c.is_ascii_hexdigit()
+                        || c == '.'
+                        || c == 'x'
+                        || c == 'X'
+                        || c == 'b'
+                        || c == 'B'
+                        || c == 'o'
+                        || c == 'O'
+                        || c == '_'
             )
     }
 
     /// The grapheme spans of the line's numbers, in the order they occur
     /// in the line. A number is an integer (a run of ASCII digits), a
-    /// float (exactly one dot, not at the start or the end), or a
+    /// float (exactly one dot, not at the start or the end), a
     /// scientific number (an integer or a float, a lowercase `e`, then a
-    /// run of digits) — and each of those may use underscores as visual
-    /// separators, a separator never at the start or the end of the
-    /// number. Concretely, a number is one maximal run of the
-    /// characters it may be built from (digits, dots, `e`s,
-    /// underscores) that forms a number under those rules; a run that
-    /// does not is not a number. The line knows where the runs are; the
-    /// styling of the spans is decided by the structure that owns the
-    /// buffer's styling.
+    /// run of digits), a hexadecimal literal (`0x` or `0X`, then hex
+    /// digits), a binary literal (`0b` or `0B`, then 0s and 1s), or an
+    /// octal literal (`0o` or `0O`, then 0-7) — and each of those may
+    /// use underscores as visual separators, a separator never at the
+    /// start or the end of the number. Concretely, a number is one
+    /// maximal run of the characters it may be built from (digits, hex
+    /// digits, dots, `e`s, prefix letters, underscores) that forms a
+    /// number under those rules; a run that does not is not a number —
+    /// so the `123` of `abc123def` is not highlighted on its own.
+    /// The line knows where the runs are; the styling of the spans is
+    /// decided by the structure that owns the buffer's styling.
     pub fn number_spans(&self) -> Vec<Range<usize>> {
         let mut runs = Vec::new();
         let mut run_start: Option<usize> = None;
@@ -510,20 +524,53 @@ impl Line {
 
 /// Whether `run` — a maximal run of the characters a number may be
 /// built from — is a number: an integer (a run of ASCII digits), a float
-/// (exactly one dot, not at the start or the end), or a scientific
-/// number (an integer or a float, a lowercase `e`, then a run of digits);
-/// underscores may separate the characters anywhere but the start and the
-/// end of the run, so they are stripped before the check.
+/// (exactly one dot, not at the start or the end), a scientific number
+/// (an integer or a float, a lowercase `e`, then a run of digits), a
+/// hexadecimal literal (`0x` or `0X`, then one or more hex digits), a
+/// binary literal (`0b` or `0B`, then one or more 0s and 1s), or an
+/// octal literal (`0o` or `0O`, then one or more 0-7); underscores may
+/// separate the characters anywhere but the start and the end of the
+/// run, so they are stripped before the check.
 fn is_number(run: &str) -> bool {
     if run.starts_with('_') || run.ends_with('_') {
         return false;
     }
     let stripped: String = run.chars().filter(|&c| c != '_').collect();
+    // Every character of a run is ASCII, so a two-byte slice is a valid
+    // prefix probe: a longer run hands over its first two characters,
+    // a shorter one its whole self, which matches no prefix below.
+    match &stripped[..stripped.len().min(2)] {
+        "0x" | "0X" => is_hex_digits(&stripped[2..]),
+        "0b" | "0B" => is_binary_digits(&stripped[2..]),
+        "0o" | "0O" => is_octal_digits(&stripped[2..]),
+        _ => is_plain_number(&stripped),
+    }
+}
+
+/// Whether `text` is one or more hexadecimal digits (0-9, A-F, a-f).
+fn is_hex_digits(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `text` is one or more binary digits (0 or 1).
+fn is_binary_digits(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c == '0' || c == '1')
+}
+
+/// Whether `text` is one or more octal digits (0-7).
+fn is_octal_digits(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| ('0'..='7').contains(&c))
+}
+
+/// Whether `stripped` — the underscore-free form of a run that carries
+/// no literal prefix — is an integer or a float, or a scientific
+/// number.
+fn is_plain_number(stripped: &str) -> bool {
     match stripped.find('e') {
         Some(at_e) if !stripped[at_e.saturating_add(1)..].contains('e') => {
             is_int_or_float(&stripped[..at_e]) && is_int(&stripped[at_e.saturating_add(1)..])
         }
-        None => is_int_or_float(&stripped),
+        None => is_int_or_float(stripped),
         Some(_) => false,
     }
 }
@@ -1034,7 +1081,9 @@ mod tests {
 
     #[test]
     fn number_spans_split_on_characters_numbers_cannot_be_built_from() {
-        let line = Line::from("1a2b3");
+        // g and h are no hex digits and no prefix letters, so they
+        // break the runs.
+        let line = Line::from("1g2h3");
         assert_eq!(line.number_spans(), vec![0..1, 2..3, 4..5]);
     }
 
@@ -1072,11 +1121,39 @@ mod tests {
     }
 
     #[test]
-    fn number_spans_of_a_run_built_into_a_word_cover_only_the_run() {
-        // The letters break the run on both sides; the 123 in the middle
-        // is an integer and the lone e after it is not a number.
-        let line = Line::from("abc123def");
-        assert_eq!(line.number_spans(), vec![3..6]);
+    fn number_spans_cover_hexadecimal_literals() {
+        // 0x1F and 0Xdeadbeef are hex literals, in either prefix case.
+        // 0x carries no digits, and 123x is neither a decimal integer
+        // nor a prefixed literal, so neither is a number.
+        let line = Line::from("0x1F 0Xdeadbeef 0x 123x");
+        assert_eq!(line.number_spans(), vec![0..4, 5..15]);
+    }
+
+    #[test]
+    fn number_spans_cover_binary_literals() {
+        // 0b101 and 0B1111 are binary literals; 0b2 is not, because 2
+        // is not a binary digit.
+        let line = Line::from("0b101 0B1111 0b2");
+        assert_eq!(line.number_spans(), vec![0..5, 6..12]);
+    }
+
+    #[test]
+    fn number_spans_cover_octal_literals() {
+        // 0o755 and 0O123 are octal literals; 0o8 is not, because 8 is
+        // not an octal digit.
+        let line = Line::from("0o755 0O123 0o8");
+        assert_eq!(line.number_spans(), vec![0..5, 6..11]);
+    }
+
+    #[test]
+    fn number_spans_of_a_run_glued_to_letters_covers_nothing() {
+        // Hex digits and the prefix letters are number characters, so
+        // 1f2 is one run: it forms no number, so nothing in it is
+        // highlighted — and neither is the 123 of abc123def, which is
+        // the run ab123 (c breaks the run) glued to the run def.
+        let no_spans = Vec::<Range<usize>>::new();
+        assert_eq!(Line::from("1f2").number_spans(), no_spans);
+        assert_eq!(Line::from("abc123def").number_spans(), no_spans);
     }
 
     #[test]
