@@ -96,6 +96,18 @@ impl Line {
             )
     }
 
+    /// Whether the grapheme at `grapheme_index` is a word character: an
+    /// ASCII identifier character — a letter, a digit, or an underscore.
+    /// A multi-char cluster like a keycap emoji is not one.
+    fn is_word_char(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        text.len() == 1
+            && matches!(
+                text.chars().next(),
+                Some(c) if c.is_ascii_alphanumeric() || c == '_'
+            )
+    }
+
     /// The grapheme spans of the line's numbers, in the order they occur
     /// in the line. A number is an integer (a run of ASCII digits), a
     /// float (exactly one dot, not at the start or the end), a
@@ -130,11 +142,38 @@ impl Line {
             .collect()
     }
 
+    /// The grapheme spans of the line's words, in the order they occur
+    /// in the line. A word is one maximal run of ASCII identifier
+    /// characters (`[A-Za-z0-9_]`), and every run is reported, whatever
+    /// it forms: the line knows where the runs are; the decision of
+    /// which of them carries a style — a keyword, a type, a literal —
+    /// is made by the structure that owns the buffer's styling.
+    ///
+    /// The character class is deliberately ASCII-only: Rust identifiers
+    /// may be Unicode, but every word the styling lists contain is
+    /// ASCII, so a Unicode identifier can never be a whole-word match,
+    /// and an ASCII maximal-run matcher is sufficient.
+    pub fn word_spans(&self) -> Vec<Range<usize>> {
+        let mut runs = Vec::new();
+        let mut run_start: Option<usize> = None;
+        for index in 0..self.fragments.len() {
+            if self.is_word_char(index) {
+                run_start.get_or_insert(index);
+            } else if let Some(start) = run_start.take() {
+                runs.push(start..index);
+            }
+        }
+        if let Some(start) = run_start {
+            runs.push(start..self.fragments.len());
+        }
+        runs
+    }
+
     /// The text of the grapheme run from `start` to (exclusive) `end`
-    /// as a slice of the line's text: every grapheme of a run of number
-    /// characters is a single character, so the run is a contiguous
-    /// slice of the text.
-    fn run_text(&self, start: usize, end: usize) -> &str {
+    /// as a slice of the line's text: every grapheme of a run of
+    /// single-character graphemes — a number run, a word run — is one
+    /// character, so the run is a contiguous slice of the text.
+    pub(crate) fn run_text(&self, start: usize, end: usize) -> &str {
         let from = self.fragments[start].byte_index;
         let to = if end < self.fragments.len() {
             self.fragments[end].byte_index
@@ -1154,6 +1193,52 @@ mod tests {
         let no_spans = Vec::<Range<usize>>::new();
         assert_eq!(Line::from("1f2").number_spans(), no_spans);
         assert_eq!(Line::from("abc123def").number_spans(), no_spans);
+    }
+
+    #[test]
+    fn word_spans_of_an_empty_line_is_empty() {
+        let line = Line::from("");
+        assert_eq!(line.word_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn word_spans_cover_the_whole_line_when_it_is_one_word() {
+        let line = Line::from("abc_def");
+        assert_eq!(line.word_spans(), vec![0..7]);
+    }
+
+    #[test]
+    fn word_spans_join_digits_and_underscores_into_one_run() {
+        let line = Line::from("a1_b2");
+        assert_eq!(line.word_spans(), vec![0..5]);
+    }
+
+    #[test]
+    fn word_spans_split_on_punctuation() {
+        let line = Line::from("a-b_c");
+        assert_eq!(line.word_spans(), vec![0..1, 2..5]);
+    }
+
+    #[test]
+    fn word_spans_end_at_a_punctuation_boundary() {
+        // Punctuation is not a word character, so the run is exactly
+        // `true` — the whole-word match the `!` allows.
+        let line = Line::from("true!");
+        assert_eq!(line.word_spans(), vec![0..4]);
+    }
+
+    #[test]
+    fn word_spans_do_not_count_a_unicode_grapheme_as_a_word_character() {
+        // 'é' is not an ASCII identifier character, so it breaks the
+        // runs: "aéb" is the two runs "a" and "b".
+        let line = Line::from("aéb");
+        assert_eq!(line.word_spans(), vec![0..1, 2..3]);
+    }
+
+    #[test]
+    fn word_spans_do_not_count_a_tab_as_a_word_character() {
+        let line = Line::from("a\tb");
+        assert_eq!(line.word_spans(), vec![0..1, 2..3]);
     }
 
     #[test]

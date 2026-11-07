@@ -7,8 +7,9 @@ use std::sync::Arc;
 /// How a span of a line's text is styled. The view renders each kind
 /// differently: plain spans in the terminal's default colors, search
 /// matches in the match highlight, the active match — the one the caret
-/// sits on — in its own, stronger highlight, and numbers in the digit
-/// color.
+/// sits on — in its own, stronger highlight, numbers in the digit
+/// color, keywords in the keyword color, common type names in the type
+/// color, and literals and enum-variant names in the literal color.
 ///
 /// This is the palette of the buffer's styling: a syntax coloring pass
 /// (keywords, strings, comments, ...) adds to it, and the view learns to
@@ -25,6 +26,15 @@ pub enum Style {
     /// hexadecimal, binary, or octal literal, and the same with
     /// underscore separators: drawn in the digit color.
     Digit,
+    /// A keyword of the language being highlighted: drawn in the keyword
+    /// color.
+    Keyword,
+    /// A common type name — an integer, float, or primitive type, or a
+    /// frequent standard-library type: drawn in the type color.
+    Type,
+    /// A literal or enum-variant name — a boolean literal or a variant
+    /// of a common standard-library enum: drawn in the literal color.
+    Literal,
 }
 
 /// The styling of one line of a buffer: the grapheme spans that carry a
@@ -123,7 +133,14 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// literal (`0b` or `0B`, then 0s and 1s), an octal literal (`0o` or
 /// `0O`, then 0-7), and each of those with underscores as visual
 /// separators — a separator never at the start or the end of the
-/// number.
+/// number. Whole words of the line are styled too: each word is one
+/// maximal run of ASCII identifier characters, and a word that exactly
+/// equals one of the reference keywords (minus `static`), one of the
+/// common type names, or one of the literal and enum-variant names
+/// carries that group's style — a word in no list is left plain. The
+/// word spans are added after the number spans, so a type like `u128`
+/// or `i8` wins the overlap of its inner digit spans and renders fully
+/// in the type color.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -132,16 +149,71 @@ impl RustSyntaxHighlighter {
     pub const FILE_TYPE: FileType = FileType::Rust;
 }
 
+/// The keywords of the Rust reference: the reference's keyword list,
+/// minus `static` — it is used so often as a lifetime prefix that
+/// highlighting it is noise. `true` and `false` are not keywords here;
+/// they are literals in [`LITERALS`]. The reserved-but-obsolete keywords
+/// (`abstract`, `box`, `become`, ...) are not highlighted.
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn",
+    "else", "enum", "extern", "fn", "for", "if", "impl", "in", "let",
+    "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
+    "Self", "struct", "super", "trait", "type", "unsafe", "use", "where",
+    "while",
+];
+
+/// The common type names: the integer and float primitives, `bool` and
+/// `char`, and the standard-library types Rust code reaches for most.
+const TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize",
+    "u8", "u16", "u32", "u64", "u128", "usize",
+    "f32", "f64",
+    "bool", "char",
+    "Option", "Result",
+    "String", "str",
+    "Vec", "HashMap",
+];
+
+/// The literal and enum-variant names: the boolean literals and the
+/// variants of the most common standard-library enums.
+const LITERALS: &[&str] = &["Some", "None", "Ok", "Err", "true", "false"];
+
+/// The style a whole word carries under the Rust rules: the style of
+/// the list the word is in, or `None` when it is in no list.
+fn style_of_word(word: &str) -> Option<Style> {
+    if KEYWORDS.contains(&word) {
+        Some(Style::Keyword)
+    } else if TYPES.contains(&word) {
+        Some(Style::Type)
+    } else if LITERALS.contains(&word) {
+        Some(Style::Literal)
+    } else {
+        None
+    }
+}
+
 impl SyntaxHighlighter for RustSyntaxHighlighter {
     fn file_type(&self) -> FileType {
         Self::FILE_TYPE
     }
 
-    /// A digit style over each of the line's numbers.
+    /// A digit style over each of the line's numbers, and the style of
+    /// each of its words that is a keyword, a common type name, or a
+    /// literal or enum-variant name.
     fn base_style(&self, line: &Line) -> LineStyle {
         let mut style = LineStyle::new();
         for span in line.number_spans() {
             style.add(span, Style::Digit);
+        }
+        // The word spans are added after the number spans on purpose:
+        // a later span wins an overlap, so a type like `u128` or `i8`
+        // renders fully in the type color, over the digit spans of its
+        // inner digits.
+        for span in line.word_spans() {
+            let word = line.run_text(span.start, span.end);
+            if let Some(word_style) = style_of_word(word) {
+                style.add(span, word_style);
+            }
         }
         style
     }
@@ -168,8 +240,8 @@ fn highlighter_for(file_type: FileType) -> Arc<dyn SyntaxHighlighter> {
 ///
 /// The base styling is delegated to the [`SyntaxHighlighter`] of the
 /// buffer's file type: the highlighter decides which rules apply. For
-/// now, digits are styled only in Rust files, while plain text carries
-/// no base styling at all.
+/// now, digits and words are styled only in Rust files, while plain
+/// text carries no base styling at all.
 #[derive(Clone)]
 pub struct Styles {
     lines: Vec<LineStyle>,
@@ -464,12 +536,12 @@ mod tests {
     fn the_rust_highlighter_styles_each_number() {
         let highlighter = RustSyntaxHighlighter;
         assert_eq!(highlighter.file_type(), FileType::Rust);
-        // Only numbers are styled: 42 is an integer, and 0x1f is one
-        // hexadecimal literal, not the integers 0 and 1.
+        // 42 is an integer, and 0x1f is one hexadecimal literal, not
+        // the integers 0 and 1; let is a keyword.
         let line = Line::from("let x = 42; // 0x1f");
         assert_eq!(
             highlighter.base_style(&line).spans(),
-            &[(8..10, Style::Digit), (15..19, Style::Digit)]
+            &[(8..10, Style::Digit), (15..19, Style::Digit), (0..3, Style::Keyword)]
         );
     }
 
@@ -646,10 +718,200 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_highlighter_without_digits_has_no_spans() {
+    fn the_rust_words_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/rust_words.txt pins the word
+        // styling against the required behavioral examples and a few
+        // realistic Rust lines: the file is plain text, so the test
+        // drives the highlighter directly rather than going through the
+        // file type.
+        let lines: Vec<Line> =
+            fixture_content("rust_words.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            &[(0..2, Style::Keyword), (9..13, Style::Keyword)],
+            &[
+                (8..11, Style::Digit),
+                (14..15, Style::Digit),
+                (0..3, Style::Keyword),
+                (7..11, Style::Type),
+            ],
+            &[
+                (48..49, Style::Digit),
+                (0..5, Style::Keyword),
+                (10..14, Style::Literal),
+                (24..28, Style::Literal),
+                (32..37, Style::Literal),
+                (44..47, Style::Literal),
+            ],
+            &[],
+            &[(0..4, Style::Literal)],
+            &[],
+            &[(0..2, Style::Keyword), (12..15, Style::Keyword), (18..20, Style::Keyword)],
+            &[
+                (30..32, Style::Digit),
+                (0..3, Style::Keyword),
+                (9..16, Style::Type),
+                (17..23, Style::Type),
+                (25..28, Style::Type),
+                (29..32, Style::Type),
+                (37..44, Style::Type),
+            ],
+            &[(34..35, Style::Digit), (0..5, Style::Keyword), (12..16, Style::Literal), (26..30, Style::Literal)],
+            &[
+                (18..19, Style::Digit),
+                (29..30, Style::Digit),
+                (0..3, Style::Keyword),
+                (8..10, Style::Keyword),
+                (11..15, Style::Literal),
+                (22..26, Style::Keyword),
+            ],
+            // In f64 the whole word is one number run — f is a hex
+            // digit — that forms no number, so no digit span is added
+            // under the type span.
+            &[(0..3, Style::Keyword), (4..10, Style::Keyword), (22..25, Style::Type), (30..33, Style::Type)],
+            &[(0..3, Style::Keyword), (7..13, Style::Type), (18..22, Style::Type), (26..28, Style::Literal)],
+            &[(32..34, Style::Digit), (0..3, Style::Keyword), (11..13, Style::Keyword), (15..18, Style::Keyword)],
+            &[(15..16, Style::Digit), (0..3, Style::Keyword), (7..13, Style::Type), (14..16, Style::Type), (20..24, Style::Literal)],
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        for (line, want) in lines.iter().zip(expected.iter().copied()) {
+            assert_eq!(
+                highlighter.base_style(line).spans(),
+                want,
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_keywords() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("if x { }");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..2, Style::Keyword)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_common_types() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("let n: u128 = 5;");
+        // The digits of u128 are a number run, so they carry a Digit
+        // span; the Type span of the whole word is added after it and
+        // wins the overlap.
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[
+                (8..11, Style::Digit),
+                (14..15, Style::Digit),
+                (0..3, Style::Keyword),
+                (7..11, Style::Type),
+            ]
+        );
+        for i in 7..11 {
+            assert_eq!(style.at(i), Style::Type, "grapheme {i} of u128");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_literals_and_enum_variants() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("Some None Ok Err true false");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[
+                (0..4, Style::Literal),
+                (5..9, Style::Literal),
+                (10..12, Style::Literal),
+                (13..16, Style::Literal),
+                (17..21, Style::Literal),
+                (22..27, Style::Literal),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_style_a_word_glued_to_more_text() {
+        let highlighter = RustSyntaxHighlighter;
+        // Whole-word matching only: none of these runs equals a list
+        // entry, and `False` does not match `false`.
+        let line = Line::from("myself iffy xtrue Somex False");
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(highlighter.base_style(&line).spans(), no_spans);
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_style_static() {
         let highlighter = RustSyntaxHighlighter;
         let no_spans: &[(Range<usize>, Style)] = &[];
-        assert_eq!(highlighter.base_style(&Line::from("let x = y;")).spans(), no_spans);
+        assert_eq!(
+            highlighter.base_style(&Line::from("static")).spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_word_glued_to_punctuation() {
+        let highlighter = RustSyntaxHighlighter;
+        // Punctuation is not a word character, so the run is exactly
+        // `true`: it matches the literal.
+        let line = Line::from("true!");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..4, Style::Literal)]
+        );
+    }
+
+    #[test]
+    fn a_type_name_wins_the_overlap_with_its_inner_digit_span() {
+        let highlighter = RustSyntaxHighlighter;
+        // The inner digits of `i8` and `u128` are number runs, so they
+        // carry digit spans; the word spans are added after them, so
+        // the type style wins every grapheme of each word and no digit
+        // span survives inside one.
+        let line = Line::from("i8 u128");
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[
+                (1..2, Style::Digit),
+                (4..7, Style::Digit),
+                (0..2, Style::Type),
+                (3..7, Style::Type),
+            ]
+        );
+        for i in 0..2 {
+            assert_eq!(style.at(i), Style::Type);
+        }
+        for i in 3..7 {
+            assert_eq!(style.at(i), Style::Type);
+        }
+    }
+
+    #[test]
+    fn the_plain_text_highlighter_does_not_style_words() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter
+                .base_style(&Line::from("if let Some(x) = y { 1 }"))
+                .spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_without_digits_has_no_spans() {
+        // The line has no numbers and no word in a list: it stays
+        // unstyled.
+        let highlighter = RustSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("x = y;")).spans(),
+            no_spans
+        );
     }
 
     #[test]

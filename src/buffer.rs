@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(buf.file_type, FileType::Rust);
         assert_eq!(
             buf.styles.line(0).unwrap().spans(),
-            &[(8..10, Style::Digit)]
+            &[(8..10, Style::Digit), (0..3, Style::Keyword)]
         );
 
         let _ = std::fs::remove_file(&path);
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(buf.file_type, FileType::Rust);
         assert_eq!(
             buf.styles.line(0).unwrap().spans(),
-            &[(8..10, Style::Digit)]
+            &[(8..10, Style::Digit), (0..3, Style::Keyword)]
         );
 
         let _ = std::fs::remove_file(&path);

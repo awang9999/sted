@@ -218,8 +218,9 @@ impl View {
     }
 
     /// The styling information with which `line` is drawn on
-    /// `buffer_row`: the line's stored styling — its digits, where the
-    /// file type styles them, and the syntax coloring as it is added —
+    /// `buffer_row`: the line's stored styling — its digits and words,
+    /// where the file type styles them, and the syntax coloring as it is
+    /// added —
     /// with the open search's highlights layered on top: a match over
     /// every occurrence of the pattern on the line, and the active match
     /// over `active`, the occurrence the caret sits on, when it is on
@@ -244,8 +245,9 @@ impl View {
 
     /// Draws one buffer row: the line's visible portion as display
     /// segments, each drawn according to the style its graphemes carry
-    /// in `style` — plain, in the digit color, in the match highlight,
-    /// or in the stronger active-match highlight.
+    /// in `style` — plain, in the digit color, in the keyword, type, or
+    /// literal color, in the match highlight, or in the stronger
+    /// active-match highlight.
     fn render_buffer_row(row: usize, line: &Line, range: &Range<usize>, style: &LineStyle) {
         // `clear_row` keeps the cursor's column; the segments must start
         // at the row's beginning.
@@ -263,6 +265,15 @@ impl View {
                 }
                 Style::Digit => {
                     let _ = Terminal::print_digit(&text);
+                }
+                Style::Keyword => {
+                    let _ = Terminal::print_keyword(&text);
+                }
+                Style::Type => {
+                    let _ = Terminal::print_type(&text);
+                }
+                Style::Literal => {
+                    let _ = Terminal::print_literal(&text);
                 }
             }
         }
@@ -904,7 +915,7 @@ mod tests {
         assert_eq!(view.buffer.file_type, FileType::Rust);
         assert_eq!(
             view.buffer.styles.line(0).unwrap().spans(),
-            &[(8..10, Style::Digit)]
+            &[(8..10, Style::Digit), (0..3, Style::Keyword)]
         );
 
         let _ = std::fs::remove_file(&path);
@@ -944,7 +955,7 @@ mod tests {
         assert_eq!(view.buffer.file_type, FileType::Rust);
         assert_eq!(
             view.buffer.styles.line(0).unwrap().spans(),
-            &[(8..10, Style::Digit)]
+            &[(8..10, Style::Digit), (0..3, Style::Keyword)]
         );
         // The styling changed, so the view re-renders to show it.
         assert!(view.needs_redraw);

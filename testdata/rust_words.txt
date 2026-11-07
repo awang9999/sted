@@ -1,0 +1,14 @@
+if x { } else { }
+let n: u128 = 5;
+match x { Some(v) => v, None => false, _ => Err(0) }
+myself iffy xtrue Somex False
+true!
+static
+fn main() { for i in 0..10 { println!("{i}"); } }
+let map: HashMap<String, Vec<u32>> = HashMap::new();
+match opt { Some(v) => v, None => 0 }
+let x = if true { 1 } else { 2 };
+pub struct Point { x: f64, y: f64 }
+let r: Result<(), char> = Ok(());
+for (k, v) in &mut map { v.push(42); }
+let n: Option<i8> = None;

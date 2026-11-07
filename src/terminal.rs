@@ -177,6 +177,60 @@ impl Terminal {
         Self::print(&styled_str)
     }
 
+    /// Prints a keyword at the cursor's current position in vivid blue
+    /// text, with no background, continuing the row rather than
+    /// rewriting it. The saturated blue is clearly deeper than the
+    /// digit's soft steel-blue.
+    pub fn print_keyword(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 66,
+                g: 100,
+                b: 230,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
+    /// Prints a common type name at the cursor's current position in
+    /// medium green text, with no background, continuing the row rather
+    /// than rewriting it. The green is warm enough to read as a type
+    /// color and far from every other color in the palette.
+    pub fn print_type(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 110,
+                g: 190,
+                b: 120,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
+    /// Prints a literal or enum-variant name at the cursor's current
+    /// position in medium violet text, with no background, continuing
+    /// the row rather than rewriting it. The violet leans red, so it
+    /// stays apart from the keyword's blue.
+    pub fn print_literal(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 180,
+                g: 110,
+                b: 220,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a search match at the cursor's current position: black text
     /// on a warm mid-gray background, continuing the row rather than
     /// rewriting it. The warm gray carries a subtle yellow tinge, bright
