@@ -1034,4 +1034,111 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    // --- Fixture regression tests ---------------------------------------
+    //
+    // The files under `testdata/` are hand-made stress corpora: grapheme
+    // clusters, ZWJ emoji, raw control bytes, and trailing-newline
+    // states. These tests pin what load/save does with them, so a
+    // regression in any of these paths fails the suite instead of waiting
+    // for someone to open the file by hand.
+
+    /// The raw content of a fixture file under `testdata/`.
+    fn fixture_content(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/testdata/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture should be readable")
+    }
+
+    /// Loads a fixture file straight from `testdata/` (read-only).
+    fn load_fixture(name: &str) -> Buffer {
+        let path = format!("{}/testdata/{name}", env!("CARGO_MANIFEST_DIR"));
+        Buffer::load(&path).expect("fixture should load")
+    }
+
+    /// Copies the named fixture to a temp file, loads that copy through
+    /// `Buffer::load`, saves it, and returns the buffer plus what hit the
+    /// disk — so the real fixture is never written to.
+    fn load_and_save_copy(name: &str) -> (Buffer, String) {
+        let content = fixture_content(name);
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_fixture_{name}_{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, &content).expect("temp file should be writable");
+        let file_path = path.to_string_lossy().to_string();
+        let mut buf = Buffer::load(&file_path).expect("load should succeed");
+        buf.save().expect("save should succeed");
+        let saved =
+            std::fs::read_to_string(&path).expect("saved file should be readable");
+        let _ = std::fs::remove_file(&path);
+        (buf, saved)
+    }
+
+    #[test]
+    fn general_fixture_round_trips_byte_for_byte() {
+        let content = fixture_content("general.txt");
+        let (buf, saved) = load_and_save_copy("general.txt");
+        // The file ends with a blank line at EOF; that line must survive.
+        assert_eq!(buf.lines.len(), 92);
+        assert_eq!(saved, content);
+    }
+
+    #[test]
+    fn graphemes_fixture_round_trips_byte_for_byte() {
+        let content = fixture_content("graphemes.txt");
+        let (buf, saved) = load_and_save_copy("graphemes.txt");
+        assert_eq!(buf.lines.len(), 25);
+        assert_eq!(saved, content);
+    }
+
+    #[test]
+    fn whitespace_fixture_round_trips_raw_control_bytes() {
+        let content = fixture_content("whitespace.txt");
+        let (buf, saved) = load_and_save_copy("whitespace.txt");
+        assert_eq!(buf.lines.len(), 26);
+        // ESC (0x1B) and BEL (0x07) must survive byte-for-byte, not be
+        // stripped or replaced.
+        assert_eq!(saved, content);
+        assert!(saved.contains('\u{1b}'));
+        assert!(saved.contains('\u{7}'));
+    }
+
+    #[test]
+    fn test_code_fixture_without_trailing_newline_gains_one_on_save() {
+        let content = fixture_content("test_code.py");
+        // The fixture deliberately lacks a trailing newline; if it ever
+        // gains one, this test must fail loudly rather than silently pass.
+        assert!(!content.ends_with('\n'));
+        let (buf, saved) = load_and_save_copy("test_code.py");
+        // Saving always terminates the file with a newline (standard
+        // editor behavior), so a file that lacks one gains it.
+        assert_eq!(buf.lines.len(), 2);
+        assert_eq!(saved, format!("{content}\n"));
+    }
+
+    #[test]
+    fn fixtures_segment_grapheme_clusters_as_expected() {
+        let ws = load_fixture("whitespace.txt");
+        // Each tab is one grapheme.
+        assert_eq!(ws.lines[4].grapheme_count(), 36);
+        // The family ZWJ sequence is one grapheme, not eight code points.
+        assert_eq!(ws.lines[13].grapheme_count(), 15);
+        // A combining mark joins its base: 35 code points, 34 graphemes.
+        assert_eq!(ws.lines[19].grapheme_count(), 34);
+
+        let g = load_fixture("graphemes.txt");
+        // 53 handshake ZWJ sequences (one grapheme each) plus
+        // " End of Line, scroll until here" (31 graphemes).
+        assert_eq!(g.lines[11].grapheme_count(), 84);
+        // Full-width letters are ordinary graphemes.
+        assert_eq!(g.lines[7].grapheme_count(), 57);
+
+        let code = load_fixture("test_code.py");
+        // The zero-width non-joiner clings to the word before it:
+        // 27 code points, 26 graphemes.
+        assert_eq!(code.lines[0].grapheme_count(), 26);
+    }
 }
