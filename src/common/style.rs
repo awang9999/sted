@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// How a span of a line's text is styled. The view renders each kind
 /// differently: plain spans in the terminal's default colors, search
 /// matches in the match highlight, the active match — the one the caret
-/// sits on — in its own, stronger highlight, and digits in the digit
+/// sits on — in its own, stronger highlight, and numbers in the digit
 /// color.
 ///
 /// This is the palette of the buffer's styling: a syntax coloring pass
@@ -21,7 +21,8 @@ pub enum Style {
     Match,
     /// The active search match, where the caret sits.
     Active,
-    /// A digit: drawn in the digit color.
+    /// A number — an integer, a float, a scientific number, and the
+    /// same with underscore separators: drawn in the digit color.
     Digit,
 }
 
@@ -113,8 +114,12 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
     }
 }
 
-/// The syntax highlighter of a Rust source file: styles each run of
-/// digits of a line with [`Style::Digit`].
+/// The syntax highlighter of a Rust source file: styles each number of
+/// a line with [`Style::Digit`]: an integer (a run of ASCII digits), a
+/// float (exactly one dot, not at the start or the end), a scientific
+/// number (an integer or a float, a lowercase `e`, then digits), and
+/// each of those with underscores as visual separators — a separator
+/// never at the start or the end of the number.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -128,10 +133,10 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         Self::FILE_TYPE
     }
 
-    /// A digit style over each run of the line's digits.
+    /// A digit style over each of the line's numbers.
     fn base_style(&self, line: &Line) -> LineStyle {
         let mut style = LineStyle::new();
-        for span in line.digit_spans() {
+        for span in line.number_spans() {
             style.add(span, Style::Digit);
         }
         style
@@ -450,17 +455,133 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_highlighter_styles_each_run_of_digits() {
+    fn the_rust_highlighter_styles_each_integer() {
         let highlighter = RustSyntaxHighlighter;
         assert_eq!(highlighter.file_type(), FileType::Rust);
-        // Only runs of digits are styled: the `0` and the `1` of the
-        // hex literal are separate runs, and the `x` and `f` are not
-        // digits at all.
+        // Only numbers are styled: the `0` and the `1` of the hex
+        // literal are separate integers, and the `x` and `f` are not
+        // number characters at all.
         let line = Line::from("let x = 42; // 0x1f");
         assert_eq!(
             highlighter.base_style(&line).spans(),
             &[(8..10, Style::Digit), (15..16, Style::Digit), (17..18, Style::Digit)]
         );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_floats_with_one_interior_dot() {
+        let highlighter = RustSyntaxHighlighter;
+        // A dot between digits makes a float: the whole number is
+        // styled, the dot included.
+        let line = Line::from("pi = 3.14");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(5..9, Style::Digit)]
+        );
+        // A dot at the start or the end of the run is not a float,
+        // and neither is a run with two dots.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from(".5 and 5.")).spans(),
+            no_spans
+        );
+        assert_eq!(
+            highlighter.base_style(&Line::from("1.2.3")).spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_scientific_numbers() {
+        let highlighter = RustSyntaxHighlighter;
+        // An integer or a float, an e, then a run of digits: 50e10 and
+        // 1.5e3 are both numbers.
+        let line = Line::from("a = 50e10 b = 1.5e3");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(4..9, Style::Digit), (14..19, Style::Digit)]
+        );
+        // A float where an integer is required (5e1.0, 1.e3), a missing
+        // side (5e, e5), or a second e (50e10e5) is not a number.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter
+                .base_style(&Line::from("5e1.0 5e e5 50e10e5 1.e3"))
+                .spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_underscore_separators_between_characters() {
+        let highlighter = RustSyntaxHighlighter;
+        // An underscore between characters is a visual separator: the
+        // whole number is styled, the separators included.
+        let line = Line::from("n = 1_000_000");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(4..13, Style::Digit)]
+        );
+        // A separator at the start or the end of the word is not a
+        // separator: neither run is a number.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("_1_000 1_000_")).spans(),
+            no_spans
+        );
+    }
+
+    /// The raw content of a fixture file under `testdata/`.
+    fn fixture_content(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/testdata/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture should be readable")
+    }
+
+    #[test]
+    fn the_numbers_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/numbers.txt pins the highlighter's
+        // rules against a realistic line per case: the file is plain
+        // text, so the test drives the highlighter directly rather than
+        // going through the file type.
+        let lines: Vec<Line> =
+            fixture_content("numbers.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            &[(0..2, Style::Digit)],
+            &[(0..1, Style::Digit), (2..5, Style::Digit)],
+            &[(0..4, Style::Digit), (5..8, Style::Digit)],
+            &[(0..7, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[(0..7, Style::Digit)],
+            &[(0..5, Style::Digit)],
+            &[(0..9, Style::Digit)],
+            &[(0..9, Style::Digit)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[(3..6, Style::Digit)],
+            &[(0..1, Style::Digit), (2..3, Style::Digit)],
+            &[(0..6, Style::Digit)],
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        for (line, want) in lines.iter().zip(expected.iter().copied()) {
+            assert_eq!(
+                highlighter.base_style(line).spans(),
+                want,
+                "line: {line}"
+            );
+        }
     }
 
     #[test]

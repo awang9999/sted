@@ -72,33 +72,62 @@ impl Line {
         }
     }
 
-    /// Whether the grapheme at `grapheme_index` is a digit: one or more
-    /// ASCII digits, so a multi-char cluster like a keycap emoji is not.
-    fn is_digit(&self, grapheme_index: usize) -> bool {
-        self.display_text_of(grapheme_index)
-            .chars()
-            .all(|c| c.is_ascii_digit())
+    /// Whether the grapheme at `grapheme_index` is one of the characters
+    /// a number may be built from: an ASCII digit, a dot, a lowercase
+    /// `e` (scientific notation), or an underscore (a visual separator).
+    /// A multi-char cluster like a keycap emoji is none of them.
+    fn is_number_char(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        text.len() == 1
+            && matches!(
+                text.chars().next(),
+                Some(c) if c.is_ascii_digit() || c == '.' || c == 'e' || c == '_'
+            )
     }
 
-    /// The grapheme spans of the line's runs of digits: each span covers
-    /// one or more consecutive digit graphemes, in the order they occur
-    /// in the line. The line knows which of its graphemes are digits; the
-    /// styling of those spans is decided by the structure that owns the
+    /// The grapheme spans of the line's numbers, in the order they occur
+    /// in the line. A number is an integer (a run of ASCII digits), a
+    /// float (exactly one dot, not at the start or the end), or a
+    /// scientific number (an integer or a float, a lowercase `e`, then a
+    /// run of digits) — and each of those may use underscores as visual
+    /// separators, a separator never at the start or the end of the
+    /// number. Concretely, a number is one maximal run of the
+    /// characters it may be built from (digits, dots, `e`s,
+    /// underscores) that forms a number under those rules; a run that
+    /// does not is not a number. The line knows where the runs are; the
+    /// styling of the spans is decided by the structure that owns the
     /// buffer's styling.
-    pub fn digit_spans(&self) -> Vec<Range<usize>> {
-        let mut spans = Vec::new();
+    pub fn number_spans(&self) -> Vec<Range<usize>> {
+        let mut runs = Vec::new();
         let mut run_start: Option<usize> = None;
         for index in 0..self.fragments.len() {
-            if self.is_digit(index) {
+            if self.is_number_char(index) {
                 run_start.get_or_insert(index);
             } else if let Some(start) = run_start.take() {
-                spans.push(start..index);
+                runs.push(start..index);
             }
         }
         if let Some(start) = run_start {
-            spans.push(start..self.fragments.len());
+            runs.push(start..self.fragments.len());
         }
-        spans
+        runs
+            .into_iter()
+            .filter(|run| is_number(self.run_text(run.start, run.end)))
+            .collect()
+    }
+
+    /// The text of the grapheme run from `start` to (exclusive) `end`
+    /// as a slice of the line's text: every grapheme of a run of number
+    /// characters is a single character, so the run is a contiguous
+    /// slice of the text.
+    fn run_text(&self, start: usize, end: usize) -> &str {
+        let from = self.fragments[start].byte_index;
+        let to = if end < self.fragments.len() {
+            self.fragments[end].byte_index
+        } else {
+            self.text.len()
+        };
+        &self.text[from..to]
     }
 
     /// Appends the content of `other` to this line, keeping this line's existing content first.
@@ -477,6 +506,43 @@ impl Line {
             _ => None,
         }
     }
+}
+
+/// Whether `run` — a maximal run of the characters a number may be
+/// built from — is a number: an integer (a run of ASCII digits), a float
+/// (exactly one dot, not at the start or the end), or a scientific
+/// number (an integer or a float, a lowercase `e`, then a run of digits);
+/// underscores may separate the characters anywhere but the start and the
+/// end of the run, so they are stripped before the check.
+fn is_number(run: &str) -> bool {
+    if run.starts_with('_') || run.ends_with('_') {
+        return false;
+    }
+    let stripped: String = run.chars().filter(|&c| c != '_').collect();
+    match stripped.find('e') {
+        Some(at_e) if !stripped[at_e.saturating_add(1)..].contains('e') => {
+            is_int_or_float(&stripped[..at_e]) && is_int(&stripped[at_e.saturating_add(1)..])
+        }
+        None => is_int_or_float(&stripped),
+        Some(_) => false,
+    }
+}
+
+/// Whether `text` is an integer (one or more ASCII digits) or a float
+/// (exactly one dot, with a run of digits on each side of it).
+fn is_int_or_float(text: &str) -> bool {
+    match text.find('.') {
+        Some(at_dot) if !text[at_dot.saturating_add(1)..].contains('.') => {
+            is_int(&text[..at_dot]) && is_int(&text[at_dot.saturating_add(1)..])
+        }
+        None => is_int(text),
+        Some(_) => false,
+    }
+}
+
+/// Whether `text` is one or more ASCII digits.
+fn is_int(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -949,35 +1015,68 @@ mod tests {
     }
 
     #[test]
-    fn digit_spans_cover_each_run_of_digits() {
+    fn number_spans_cover_each_integer() {
         let line = Line::from("abc 123 def 42");
-        assert_eq!(line.digit_spans(), vec![4..7, 12..14]);
+        assert_eq!(line.number_spans(), vec![4..7, 12..14]);
     }
 
     #[test]
-    fn digit_spans_of_a_line_without_digits_is_empty() {
+    fn number_spans_of_a_line_without_numbers_is_empty() {
         let line = Line::from("abc def");
-        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
+        assert_eq!(line.number_spans(), Vec::<Range<usize>>::new());
     }
 
     #[test]
-    fn digit_spans_of_an_empty_line_is_empty() {
+    fn number_spans_of_an_empty_line_is_empty() {
         let line = Line::from("");
-        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
+        assert_eq!(line.number_spans(), Vec::<Range<usize>>::new());
     }
 
     #[test]
-    fn digit_spans_split_on_non_digit_graphemes() {
+    fn number_spans_split_on_characters_numbers_cannot_be_built_from() {
         let line = Line::from("1a2b3");
-        assert_eq!(line.digit_spans(), vec![0..1, 2..3, 4..5]);
+        assert_eq!(line.number_spans(), vec![0..1, 2..3, 4..5]);
     }
 
     #[test]
-    fn digit_spans_do_not_count_a_keycap_emoji_as_a_digit() {
+    fn number_spans_do_not_count_a_keycap_emoji_as_a_number() {
         // A keycap is a digit plus a combining enclosing keycap: one
-        // multi-char grapheme cluster, so it is not a digit.
+        // multi-char grapheme cluster, so it is not a number character.
         let line = Line::from("5\u{20e3}");
-        assert_eq!(line.digit_spans(), Vec::<Range<usize>>::new());
+        assert_eq!(line.number_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn number_spans_cover_floats_with_one_dot_not_at_an_edge() {
+        // 3.14 is a float; .5 starts with the dot, 5. ends with it, and
+        // 1.2.3 carries two dots, so none of them is a float.
+        let line = Line::from("3.14 .5 5. 1.2.3");
+        assert_eq!(line.number_spans(), vec![0..4]);
+    }
+
+    #[test]
+    fn number_spans_cover_scientific_numbers() {
+        // 50e10: an integer, an e, digits. 1.5e3: a float, an e, digits.
+        // 5e and e5 miss a side; 5e1.0 and 1.e3 carry a float where an
+        // integer is required.
+        let line = Line::from("50e10 1.5e3 5e e5 5e1.0 1.e3");
+        assert_eq!(line.number_spans(), vec![0..5, 6..11]);
+    }
+
+    #[test]
+    fn number_spans_cover_underscore_separators_between_characters() {
+        // 1_000 is a number with a visual separator; _1_000 starts with
+        // one and 1_000_ ends with one, so neither is a number.
+        let line = Line::from("1_000 _1_000 1_000_");
+        assert_eq!(line.number_spans(), vec![0..5]);
+    }
+
+    #[test]
+    fn number_spans_of_a_run_built_into_a_word_cover_only_the_run() {
+        // The letters break the run on both sides; the 123 in the middle
+        // is an integer and the lone e after it is not a number.
+        let line = Line::from("abc123def");
+        assert_eq!(line.number_spans(), vec![3..6]);
     }
 
     #[test]
