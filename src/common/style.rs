@@ -1,6 +1,8 @@
 use crate::common::line::Line;
 use crate::common::types::FileType;
+use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// How a span of a line's text is styled. The view renders each kind
 /// differently: plain spans in the terminal's default colors, search
@@ -71,38 +73,134 @@ impl LineStyle {
     }
 }
 
+/// A syntax highlighter for one language: the rules that decide how a
+/// line's text is styled at the base level, before the buffer's other
+/// styles (search matches, the active match) are layered on top.
+///
+/// The [`Styles`] of a buffer delegates its base styling to the
+/// highlighter of the buffer's file type, so a new language is a new
+/// implementation of this trait: `Styles` and the buffer learn nothing
+/// about it. Each language ships one highlighter, held behind an
+/// [`Arc`] so a `Styles` — and with it a buffer — stays `Clone`.
+pub trait SyntaxHighlighter: Send + Sync {
+    /// The type of file this highlighter styles: the file type it is
+    /// registered as the highlighter of.
+    fn file_type(&self) -> FileType;
+
+    /// The base styling of `line`'s text under this language's rules.
+    fn base_style(&self, line: &Line) -> LineStyle;
+}
+
+/// A syntax highlighter that styles no text at all: the base styling of
+/// every line is empty. The rules of plain text.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlainTextSyntaxHighlighter;
+
+impl PlainTextSyntaxHighlighter {
+    /// The highlighter's file type: [`FileType::PlainText`].
+    pub const FILE_TYPE: FileType = FileType::PlainText;
+}
+
+impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
+    fn file_type(&self) -> FileType {
+        Self::FILE_TYPE
+    }
+
+    /// Plain text carries no base styling: the digits stay unstyled, so
+    /// only the other styles — a search match, say — ever appear on it.
+    fn base_style(&self, _line: &Line) -> LineStyle {
+        LineStyle::new()
+    }
+}
+
+/// The syntax highlighter of a Rust source file: styles each run of
+/// digits of a line with [`Style::Digit`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RustSyntaxHighlighter;
+
+impl RustSyntaxHighlighter {
+    /// The highlighter's file type: [`FileType::Rust`].
+    pub const FILE_TYPE: FileType = FileType::Rust;
+}
+
+impl SyntaxHighlighter for RustSyntaxHighlighter {
+    fn file_type(&self) -> FileType {
+        Self::FILE_TYPE
+    }
+
+    /// A digit style over each run of the line's digits.
+    fn base_style(&self, line: &Line) -> LineStyle {
+        let mut style = LineStyle::new();
+        for span in line.digit_spans() {
+            style.add(span, Style::Digit);
+        }
+        style
+    }
+}
+
+/// The highlighter that styles a file of `file_type`: the language's
+/// highlighter, or the plain text one — which styles nothing — when the
+/// file type carries no highlighting rules of its own.
+fn highlighter_for(file_type: FileType) -> Arc<dyn SyntaxHighlighter> {
+    match file_type {
+        FileType::PlainText => Arc::new(PlainTextSyntaxHighlighter),
+        FileType::Rust => Arc::new(RustSyntaxHighlighter),
+    }
+}
+
 /// The styling of the lines of a buffer: one [`LineStyle`] per line,
 /// kept in parallel with the buffer's lines.
 ///
 /// This structure is the single owner of how the buffer's text is
-/// styled: the digits of the text for now, and syntax coloring as it is
-/// added. It stores, for each line, the styling information, and the
+/// styled: the base styling of the text for now, and more coloring as it
+/// is added. It stores, for each line, the styling information, and the
 /// view hands a line its styling when the line builds its annotated
 /// string.
 ///
-/// The styling follows the buffer's file type: the type decides which
-/// rules apply. For now, digits are styled only in Rust files, while
-/// plain text carries no base styling at all.
-#[derive(Clone, Debug, Default)]
+/// The base styling is delegated to the [`SyntaxHighlighter`] of the
+/// buffer's file type: the highlighter decides which rules apply. For
+/// now, digits are styled only in Rust files, while plain text carries
+/// no base styling at all.
+#[derive(Clone)]
 pub struct Styles {
     lines: Vec<LineStyle>,
-    /// The type of file the styled lines belong to: it decides which
-    /// highlighting rules the base styling applies — for now, digits
-    /// are styled only in Rust files, while plain text carries no base
-    /// styling at all.
-    file_type: FileType,
+    /// The highlighter whose rules the base styling of the lines is
+    /// built under: the one of the buffer's file type. Held behind an
+    /// [`Arc`] so a `Styles` — and with it a buffer — stays `Clone`.
+    highlighter: Arc<dyn SyntaxHighlighter>,
+}
+
+impl Default for Styles {
+    /// The styling of a new, unnamed document: no lines, and the plain
+    /// text highlighter — which styles nothing — as the rules.
+    fn default() -> Self {
+        Self::for_lines(FileType::PlainText, &[])
+    }
+}
+
+impl fmt::Debug for Styles {
+    /// The lines and the type of the highlighter in use — the
+    /// highlighter itself is a black box to the formatter.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Styles")
+            .field("lines", &self.lines)
+            .field("file_type", &self.highlighter.file_type())
+            .finish()
+    }
 }
 
 impl Styles {
     /// The styling for a slice of the lines of a `file_type` file: the
-    /// base styling of each line, with no other styles.
+    /// base styling of each line under the file type's highlighter's
+    /// rules, with no other styles.
     pub fn for_lines(file_type: FileType, lines: &[Line]) -> Self {
+        let highlighter = highlighter_for(file_type);
         Self {
             lines: lines
                 .iter()
-                .map(|line| Self::base_for(file_type, line))
+                .map(|line| highlighter.base_style(line))
                 .collect(),
-            file_type,
+            highlighter,
         }
     }
 
@@ -117,7 +215,7 @@ impl Styles {
     /// buffer.
     pub fn insert_line(&mut self, row: usize, line: &Line) {
         self.lines
-            .insert(row.min(self.lines.len()), Self::base_for(self.file_type, line));
+            .insert(row.min(self.lines.len()), self.highlighter.base_style(line));
     }
 
     /// Removes the styling of the line at `row`, shifting the following
@@ -134,37 +232,33 @@ impl Styles {
     /// the line's text being edited. Rows out of range are ignored.
     pub fn refresh_line(&mut self, row: usize, line: &Line) {
         if let Some(style) = self.lines.get_mut(row) {
-            *style = Self::base_for(self.file_type, line);
+            *style = self.highlighter.base_style(line);
         }
     }
 
     /// Updates the type the styled lines belong to. When it changes, the
-    /// base styling of every line in `lines` is rebuilt under the new
-    /// rules, so a re-typed buffer (a save-as to a new extension) gets
-    /// its digits highlighted or un-highlighted accordingly.
+    /// highlighter's rules change with it, so the base styling of every
+    /// line in `lines` is rebuilt under the new rules: a re-typed buffer
+    /// (a save-as to a new extension) gets its digits highlighted or
+    /// un-highlighted accordingly.
     pub fn set_file_type(&mut self, file_type: FileType, lines: &[Line]) {
-        if self.file_type == file_type {
+        if self.highlighter.file_type() == file_type {
             return;
         }
-        self.file_type = file_type;
+        self.highlighter = highlighter_for(file_type);
         self.lines = lines
             .iter()
-            .map(|line| Self::base_for(file_type, line))
+            .map(|line| self.highlighter.base_style(line))
             .collect();
     }
 
-    /// The base styling of a line's text under the rules of `file_type`:
-    /// a digit style over each run of the line's digits, while the file
-    /// type styles digits — plain text carries none, so its digits stay
-    /// unstyled.
-    fn base_for(file_type: FileType, line: &Line) -> LineStyle {
-        let mut style = LineStyle::new();
-        if file_type == FileType::Rust {
-            for span in line.digit_spans() {
-                style.add(span, Style::Digit);
-            }
-        }
-        style
+    /// The type of file the styled lines belong to: the type of the
+    /// highlighter whose rules the base styling is built under.
+    // Only the test suite reads it so far; the buffer keeps its own
+    // copy of the type.
+    #[allow(dead_code)]
+    pub fn file_type(&self) -> FileType {
+        self.highlighter.file_type()
     }
 }
 
@@ -283,13 +377,13 @@ mod tests {
 
         // Re-typing the buffer to plain text removes the digit styling.
         styles.set_file_type(FileType::PlainText, &lines);
-        assert_eq!(styles.file_type, FileType::PlainText);
+        assert_eq!(styles.file_type(), FileType::PlainText);
         let no_spans: &[(Range<usize>, Style)] = &[];
         assert_eq!(styles.line(0).unwrap().spans(), no_spans);
 
         // ... and re-typing it to Rust restores it.
         styles.set_file_type(FileType::Rust, &lines);
-        assert_eq!(styles.file_type, FileType::Rust);
+        assert_eq!(styles.file_type(), FileType::Rust);
         assert_eq!(styles.line(0).unwrap().spans(), &[(4..7, Style::Digit)]);
     }
 
@@ -353,5 +447,57 @@ mod tests {
             styles.line(0).unwrap().spans(),
             &[(0..1, Style::Digit), (6..9, Style::Digit)]
         );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_each_run_of_digits() {
+        let highlighter = RustSyntaxHighlighter;
+        assert_eq!(highlighter.file_type(), FileType::Rust);
+        // Only runs of digits are styled: the `0` and the `1` of the
+        // hex literal are separate runs, and the `x` and `f` are not
+        // digits at all.
+        let line = Line::from("let x = 42; // 0x1f");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(8..10, Style::Digit), (15..16, Style::Digit), (17..18, Style::Digit)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_without_digits_has_no_spans() {
+        let highlighter = RustSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(highlighter.base_style(&Line::from("let x = y;")).spans(), no_spans);
+    }
+
+    #[test]
+    fn the_plain_text_highlighter_styles_nothing() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        assert_eq!(highlighter.file_type(), FileType::PlainText);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(highlighter.base_style(&Line::from("the answer is 42")).spans(), no_spans);
+    }
+
+    #[test]
+    fn the_highlighter_of_a_file_type_matches_its_type() {
+        assert_eq!(highlighter_for(FileType::PlainText).file_type(), FileType::PlainText);
+        assert_eq!(highlighter_for(FileType::Rust).file_type(), FileType::Rust);
+    }
+
+    #[test]
+    fn the_default_styles_are_styled_by_the_plain_text_highlighter() {
+        let styles = Styles::default();
+        assert_eq!(styles.file_type(), FileType::PlainText);
+    }
+
+    #[test]
+    fn the_default_highlighter_of_a_new_line_stays_unstyled() {
+        // A new document is plain text: its lines carry no base styling,
+        // so a digit inserted into a new line stays unstyled until the
+        // buffer is saved under a language's name.
+        let mut styles = Styles::for_lines(FileType::PlainText, &[]);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        styles.insert_line(0, &Line::from("42"));
+        assert_eq!(styles.line(0).unwrap().spans(), no_spans);
     }
 }
