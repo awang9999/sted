@@ -218,11 +218,12 @@ impl View {
     }
 
     /// The styling information with which `line` is drawn on
-    /// `buffer_row`: the line's stored styling — its digits, and the
-    /// syntax coloring as it is added — with the open search's
-    /// highlights layered on top: a match over every occurrence of the
-    /// pattern on the line, and the active match over `active`, the
-    /// occurrence the caret sits on, when it is on this row.
+    /// `buffer_row`: the line's stored styling — its digits, where the
+    /// file type styles them, and the syntax coloring as it is added —
+    /// with the open search's highlights layered on top: a match over
+    /// every occurrence of the pattern on the line, and the active match
+    /// over `active`, the occurrence the caret sits on, when it is on
+    /// this row.
     fn line_style(&self, line: &Line, buffer_row: usize, active: Option<Range<usize>>) -> LineStyle {
         let mut style = self
             .buffer
@@ -712,10 +713,27 @@ impl View {
         self.handle_save();
     }
 
+    /// The styling the buffer stores for the line at `row`: its base
+    /// styling — the digits, where the file type styles them — without
+    /// the open search's highlights, which the view adds when it renders.
+    // Only the test suite inspects the stored styling so far.
+    #[allow(dead_code)]
+    pub fn stored_line_style(&self, row: usize) -> LineStyle {
+        self.buffer
+            .styles
+            .line(row)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Writes the buffer to its file and reports the outcome on the message
     /// bar: a brief success note naming the file, or an error that stays
     /// visible until the user has read it.
     fn handle_save(&mut self) {
+        // The save may re-type the buffer (a save-as to a new extension),
+        // which changes how its text is styled: the view re-renders so the
+        // new styling becomes visible.
+        let file_type_before = self.buffer.file_type;
         match self.buffer.save() {
             Ok(()) => {
                 // Briefly confirm the save on the message bar.
@@ -731,6 +749,9 @@ impl View {
                 self.set_message(String::from("Error writing file!"), LONG_MESSAGE_DURATION);
             }
         }
+        if self.buffer.file_type != file_type_before {
+            self.needs_redraw = true;
+        }
     }
 }
 
@@ -745,7 +766,7 @@ mod tests {
     fn make_view(lines_data: &[&str]) -> View {
         let lines: Vec<Line> = lines_data.iter().copied().map(Line::from).collect();
         let buffer = Buffer {
-            styles: crate::common::style::Styles::for_lines(&lines),
+            styles: crate::common::style::Styles::for_lines(FileType::PlainText, &lines),
             lines,
             modified: true,
             file_name: None,
@@ -867,6 +888,85 @@ mod tests {
 
         assert_eq!(view.buffer.file_type, FileType::Rust);
         assert_eq!(view.get_status().file_type, FileType::Rust);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_of_a_rust_file_stores_the_digit_styling() {
+        let path = std::env::temp_dir().join(format!("sted_view_load_rs_{}.rs", std::process::id()));
+        std::fs::write(&path, "let x = 42;\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["existing content"]);
+        view.load(&file_path);
+
+        assert_eq!(view.buffer.file_type, FileType::Rust);
+        assert_eq!(
+            view.buffer.styles.line(0).unwrap().spans(),
+            &[(8..10, Style::Digit)]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_of_a_text_file_stores_no_digit_styling() {
+        let path =
+            std::env::temp_dir().join(format!("sted_view_load_txt_{}.txt", std::process::id()));
+        std::fs::write(&path, "the answer is 42\n").expect("create temp file");
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["existing content"]);
+        view.load(&file_path);
+
+        assert_eq!(view.buffer.file_type, FileType::PlainText);
+        // Plain text carries no base styling: the digit stays unstyled.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(view.buffer.styles.line(0).unwrap().spans(), no_spans);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_as_to_a_rust_file_highlights_the_digits() {
+        let path = std::env::temp_dir()
+            .join(format!("sted_view_save_as_rs_styled_{}.rs", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["let x = 42;"]);
+        // A new document is plain text: the digits carry no style yet.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(view.buffer.styles.line(0).unwrap().spans(), no_spans);
+
+        view.save_as(&file_path);
+
+        assert_eq!(view.buffer.file_type, FileType::Rust);
+        assert_eq!(
+            view.buffer.styles.line(0).unwrap().spans(),
+            &[(8..10, Style::Digit)]
+        );
+        // The styling changed, so the view re-renders to show it.
+        assert!(view.needs_redraw);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_as_to_a_text_file_keeps_the_digits_unhighlighted() {
+        let path = std::env::temp_dir()
+            .join(format!("sted_view_save_as_txt_plain_{}.txt", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+
+        let mut view = make_view(&["the answer is 42"]);
+        view.needs_redraw = false;
+        view.save_as(&file_path);
+
+        assert_eq!(view.buffer.file_type, FileType::PlainText);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(view.buffer.styles.line(0).unwrap().spans(), no_spans);
+        // The file type did not change, so the save re-renders nothing.
+        assert!(!view.needs_redraw);
 
         let _ = std::fs::remove_file(&path);
     }

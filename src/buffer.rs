@@ -107,13 +107,16 @@ impl Buffer {
         let file_content = read_to_string(file_path)
             .map_err(|_| format!("Error: Could not open file: {file_path}"))?;
         let lines: Vec<Line> = file_content.lines().map(Line::from).collect();
+        // The type decides how the file's text is styled, so it is
+        // detected before the styling is built.
+        let file_type = FileType::from_path(Path::new(file_path));
 
         Ok(Self {
-            styles: Styles::for_lines(&lines),
+            styles: Styles::for_lines(file_type, &lines),
             lines,
             modified: false,
             file_name: Some(file_path.to_string()),
-            file_type: FileType::from_path(Path::new(file_path)),
+            file_type,
         })
     }
 
@@ -124,7 +127,12 @@ impl Buffer {
             // The file name decides how the file is treated: re-detect
             // the type, so a document saved under a new name (a save-as)
             // picks up the rules of its new extension.
-            self.file_type = FileType::from_path(Path::new(file_name));
+            let file_type = FileType::from_path(Path::new(file_name));
+            // The type also decides how the text is styled, so the
+            // stored styling follows it: the digits are highlighted or
+            // un-highlighted accordingly.
+            self.file_type = file_type;
+            self.styles.set_file_type(file_type, &self.lines);
             let mut file = File::create(file_name)?;
             for line in &self.lines {
                 // The line's Display writes its text verbatim, so saving
@@ -237,12 +245,14 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::style::Style;
     use crate::common::types::Location;
+    use std::ops::Range;
 
     fn make_buffer(lines_data: &[&str]) -> Buffer {
         let lines: Vec<Line> = lines_data.iter().copied().map(Line::from).collect();
         Buffer {
-            styles: Styles::for_lines(&lines),
+            styles: Styles::for_lines(FileType::PlainText, &lines),
             lines,
             modified: false,
             file_name: None,
@@ -546,6 +556,43 @@ mod tests {
 
         let buf = Buffer::load(&file_path).expect("load should succeed");
         assert_eq!(buf.file_type, FileType::Rust);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_of_a_rust_file_stores_the_digit_styling() {
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_load_rs_styled_{}.rs",
+            std::process::id()
+        ));
+        std::fs::write(&path, "let x = 42;\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let buf = Buffer::load(&file_path).expect("load should succeed");
+        assert_eq!(buf.file_type, FileType::Rust);
+        assert_eq!(
+            buf.styles.line(0).unwrap().spans(),
+            &[(8..10, Style::Digit)]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_of_a_text_file_stores_no_digit_styling() {
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_load_txt_plain_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "the answer is 42\n").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let buf = Buffer::load(&file_path).expect("load should succeed");
+        assert_eq!(buf.file_type, FileType::PlainText);
+        // Plain text carries no base styling: the digit stays unstyled.
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(buf.styles.line(0).unwrap().spans(), no_spans);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -941,5 +988,50 @@ mod tests {
 
         let _ = std::fs::remove_file(&txt);
         let _ = std::fs::remove_file(&rs);
+    }
+
+    #[test]
+    fn saving_a_new_document_as_a_rust_file_adds_the_digit_styling() {
+        // A new document is plain text: its digits are unstyled...
+        let mut buf = make_buffer(&["let x = 42;"]);
+        assert_eq!(buf.file_type, FileType::PlainText);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(buf.styles.line(0).unwrap().spans(), no_spans);
+
+        // ... until it is saved under a Rust name.
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_save_rs_styled_{}.rs",
+            std::process::id()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+        buf.file_name = Some(file_path);
+        buf.save().expect("save should succeed");
+
+        assert_eq!(buf.file_type, FileType::Rust);
+        assert_eq!(
+            buf.styles.line(0).unwrap().spans(),
+            &[(8..10, Style::Digit)]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn saving_a_new_document_as_a_text_file_keeps_the_digits_unstyled() {
+        let mut buf = make_buffer(&["the answer is 42"]);
+
+        let path = std::env::temp_dir().join(format!(
+            "sted_test_save_txt_plain_{}.txt",
+            std::process::id()
+        ));
+        let file_path = path.to_string_lossy().to_string();
+        buf.file_name = Some(file_path);
+        buf.save().expect("save should succeed");
+
+        assert_eq!(buf.file_type, FileType::PlainText);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(buf.styles.line(0).unwrap().spans(), no_spans);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

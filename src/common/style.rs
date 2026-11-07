@@ -1,4 +1,5 @@
 use crate::common::line::Line;
+use crate::common::types::FileType;
 use std::ops::Range;
 
 /// How a span of a line's text is styled. The view renders each kind
@@ -78,17 +79,30 @@ impl LineStyle {
 /// added. It stores, for each line, the styling information, and the
 /// view hands a line its styling when the line builds its annotated
 /// string.
+///
+/// The styling follows the buffer's file type: the type decides which
+/// rules apply. For now, digits are styled only in Rust files, while
+/// plain text carries no base styling at all.
 #[derive(Clone, Debug, Default)]
 pub struct Styles {
     lines: Vec<LineStyle>,
+    /// The type of file the styled lines belong to: it decides which
+    /// highlighting rules the base styling applies — for now, digits
+    /// are styled only in Rust files, while plain text carries no base
+    /// styling at all.
+    file_type: FileType,
 }
 
 impl Styles {
-    /// The styling for a slice of lines: the base styling of each line,
-    /// with no other styles.
-    pub fn for_lines(lines: &[Line]) -> Self {
+    /// The styling for a slice of the lines of a `file_type` file: the
+    /// base styling of each line, with no other styles.
+    pub fn for_lines(file_type: FileType, lines: &[Line]) -> Self {
         Self {
-            lines: lines.iter().map(Self::base_for).collect(),
+            lines: lines
+                .iter()
+                .map(|line| Self::base_for(file_type, line))
+                .collect(),
+            file_type,
         }
     }
 
@@ -102,7 +116,8 @@ impl Styles {
     /// lines' styling down: the mirror of a line being inserted into the
     /// buffer.
     pub fn insert_line(&mut self, row: usize, line: &Line) {
-        self.lines.insert(row.min(self.lines.len()), Self::base_for(line));
+        self.lines
+            .insert(row.min(self.lines.len()), Self::base_for(self.file_type, line));
     }
 
     /// Removes the styling of the line at `row`, shifting the following
@@ -119,16 +134,35 @@ impl Styles {
     /// the line's text being edited. Rows out of range are ignored.
     pub fn refresh_line(&mut self, row: usize, line: &Line) {
         if let Some(style) = self.lines.get_mut(row) {
-            *style = Self::base_for(line);
+            *style = Self::base_for(self.file_type, line);
         }
     }
 
-    /// The base styling of a line's text: a digit style over each run of
-    /// the line's digits.
-    fn base_for(line: &Line) -> LineStyle {
+    /// Updates the type the styled lines belong to. When it changes, the
+    /// base styling of every line in `lines` is rebuilt under the new
+    /// rules, so a re-typed buffer (a save-as to a new extension) gets
+    /// its digits highlighted or un-highlighted accordingly.
+    pub fn set_file_type(&mut self, file_type: FileType, lines: &[Line]) {
+        if self.file_type == file_type {
+            return;
+        }
+        self.file_type = file_type;
+        self.lines = lines
+            .iter()
+            .map(|line| Self::base_for(file_type, line))
+            .collect();
+    }
+
+    /// The base styling of a line's text under the rules of `file_type`:
+    /// a digit style over each run of the line's digits, while the file
+    /// type styles digits — plain text carries none, so its digits stay
+    /// unstyled.
+    fn base_for(file_type: FileType, line: &Line) -> LineStyle {
         let mut style = LineStyle::new();
-        for span in line.digit_spans() {
-            style.add(span, Style::Digit);
+        if file_type == FileType::Rust {
+            for span in line.digit_spans() {
+                style.add(span, Style::Digit);
+            }
         }
         style
     }
@@ -138,8 +172,10 @@ impl Styles {
 mod tests {
     use super::*;
 
+    /// The base styling of `line` of a Rust file: where the digits are
+    /// styled.
     fn style_of(line: &Line) -> LineStyle {
-        Styles::for_lines(std::slice::from_ref(line))
+        Styles::for_lines(FileType::Rust, std::slice::from_ref(line))
             .line(0)
             .expect("the slice has the line")
             .clone()
@@ -208,9 +244,59 @@ mod tests {
     }
 
     #[test]
+    fn for_lines_of_plain_text_does_not_style_the_digits() {
+        let line = Line::from("abc 123 def 42");
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            Styles::for_lines(FileType::PlainText, std::slice::from_ref(&line))
+                .line(0)
+                .unwrap()
+                .spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn editing_a_plain_text_line_keeps_its_digits_unstyled() {
+        let mut line = Line::from("abc 123");
+        let mut styles = Styles::for_lines(FileType::PlainText, &[line.clone()]);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(styles.line(0).unwrap().spans(), no_spans);
+
+        // Editing the line rebuilds its styling under the plain text
+        // rules: the digits stay unstyled.
+        line.insert_char(0, '5');
+        styles.refresh_line(0, &line);
+        assert_eq!(styles.line(0).unwrap().spans(), no_spans);
+
+        // A newly inserted line is styled with the same rules.
+        styles.insert_line(0, &Line::from("42"));
+        assert_eq!(styles.line(0).unwrap().spans(), no_spans);
+        assert_eq!(styles.line(1).unwrap().spans(), no_spans);
+    }
+
+    #[test]
+    fn set_file_type_switches_the_styling_with_the_type() {
+        let lines = [Line::from("abc 123")];
+        let mut styles = Styles::for_lines(FileType::Rust, &lines);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(4..7, Style::Digit)]);
+
+        // Re-typing the buffer to plain text removes the digit styling.
+        styles.set_file_type(FileType::PlainText, &lines);
+        assert_eq!(styles.file_type, FileType::PlainText);
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(styles.line(0).unwrap().spans(), no_spans);
+
+        // ... and re-typing it to Rust restores it.
+        styles.set_file_type(FileType::Rust, &lines);
+        assert_eq!(styles.file_type, FileType::Rust);
+        assert_eq!(styles.line(0).unwrap().spans(), &[(4..7, Style::Digit)]);
+    }
+
+    #[test]
     fn for_lines_holds_one_style_per_line() {
         let lines = [Line::from("a1"), Line::from("b2"), Line::from("c")];
-        let styles = Styles::for_lines(&lines);
+        let styles = Styles::for_lines(FileType::Rust, &lines);
         assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
         assert_eq!(styles.line(1).unwrap().spans(), &[(1..2, Style::Digit)]);
         let no_spans: &[(Range<usize>, Style)] = &[];
@@ -220,7 +306,7 @@ mod tests {
 
     #[test]
     fn insert_line_places_the_base_styling_and_shifts_the_rest_down() {
-        let mut styles = Styles::for_lines(&[Line::from("a1")]);
+        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("a1")]);
         let line = Line::from("b2");
         styles.insert_line(0, &line);
         assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
@@ -230,7 +316,7 @@ mod tests {
 
     #[test]
     fn remove_line_drops_the_styling_and_shifts_the_rest_up() {
-        let mut styles = Styles::for_lines(&[Line::from("a1"), Line::from("b2")]);
+        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("a1"), Line::from("b2")]);
         styles.remove_line(0);
         assert_eq!(styles.line(0).unwrap().spans(), &[(1..2, Style::Digit)]);
         assert_eq!(styles.line(1), None);
@@ -242,7 +328,7 @@ mod tests {
     #[test]
     fn refresh_line_rebuilds_the_styling_from_the_line_text() {
         let mut line = Line::from("abc 123");
-        let mut styles = Styles::for_lines(&[line.clone()]);
+        let mut styles = Styles::for_lines(FileType::Rust, &[line.clone()]);
         assert_eq!(
             styles.line(0).unwrap().spans(),
             &[(4..7, Style::Digit)]

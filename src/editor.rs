@@ -195,7 +195,10 @@ impl Drop for Editor {
 mod tests {
     use super::*;
     use crate::common::constants::LONG_MESSAGE_DURATION;
+    use crate::common::style::Style;
+    use crate::common::types::FileType;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::ops::Range;
 
     #[test]
     fn unrecognized_command_is_reported_on_the_message_bar() {
@@ -350,6 +353,37 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).expect("saved file"), "h\n");
         assert!(!editor.view.get_status().is_modified);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn saving_a_new_file_as_a_rust_file_starts_highlighting_the_digits() {
+        let mut editor = Editor::default();
+        // Type a digit into the new, unnamed document: plain text, so it
+        // carries no style yet.
+        editor.view.handle_command(EditorCommand::Insert('4'));
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(editor.view.stored_line_style(0).spans(), no_spans);
+
+        editor.evaluate_event(ctrl_s());
+
+        let path = std::env::temp_dir()
+            .join(format!("sted_editor_saveas_rs_{}.rs", std::process::id()));
+        let file_path = path.to_string_lossy().to_string();
+        for c in file_path.chars() {
+            editor.evaluate_event(key(c));
+        }
+        editor.evaluate_event(press(KeyCode::Enter));
+
+        assert!(editor.prompt.is_none());
+        assert_eq!(editor.view.get_status().file_type, FileType::Rust);
+        // The digit now carries the digit style: saving the new file to a
+        // Rust name switched the highlighting on.
+        assert_eq!(
+            editor.view.stored_line_style(0).spans(),
+            &[(0..1, Style::Digit)]
+        );
 
         let _ = std::fs::remove_file(&path);
     }

@@ -483,15 +483,16 @@ impl Line {
 mod tests {
     use super::*;
     use crate::common::style::Styles;
+    use crate::common::types::FileType;
 
     fn byte_indices(line: &Line) -> Vec<usize> {
         line.fragments.iter().map(|f| f.byte_index).collect()
     }
 
-    /// The base styling of `line` — its digit spans — as stored by the
-    /// structure that owns the buffer's styling.
+    /// The base styling of `line` of a Rust file — its digit spans — as
+    /// stored by the structure that owns the buffer's styling.
     fn base_style(line: &Line) -> LineStyle {
-        Styles::for_lines(std::slice::from_ref(line))
+        Styles::for_lines(FileType::Rust, std::slice::from_ref(line))
             .line(0)
             .expect("the slice has the line")
             .clone()
