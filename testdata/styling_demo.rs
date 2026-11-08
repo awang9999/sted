@@ -23,8 +23,14 @@ fn char_code(c: char) -> u8 {
     match c {
         'a' => 1,
         'é' => 2,
+        '\\' => 3, // the backslash char: the escape stays inside
         _ => 0,
     }
+}
+
+fn pairing() -> char {
+    let note = "don't panic: 'ok'"; // naive: the apostrophe pairs with the next quote
+    note.chars().next().unwrap_or('?')
 }
 
 fn describe(points: &Vec<Point>) -> String {
@@ -76,3 +82,4 @@ fn main() {
 // 1f2      — one run, no valid number
 // 0b2, 0o8 — invalid binary, invalid octal
 // 'a     — unclosed quote: no closing quote, no color
+// '\' — unterminated literal: the escape eats the closing quote
