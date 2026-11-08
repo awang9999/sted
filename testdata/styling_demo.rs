@@ -1,4 +1,4 @@
-// Styling demo — open this file with sted to check the highlight colors.
+/ Styling demo — open this file with sted to check the highlight colors.
 //
 //   blue        keywords          (fn, let, if, else, match, for, in,
 //                                  mut, pub, struct, return)
@@ -46,6 +46,23 @@ fn elided(s: &'_ str) -> &'_ str {
 // is read as a lifetime: a naive-pairing consequence, pinned here.
 fn possessive(owner: &str) -> &str {
     &format!("owner's name: {owner}")
+}
+
+// Lifetime specifiers in teal, character literals in amber: the chars
+// are styled first, so the quotes of the literals are consumed and
+// never read as lifetimes — while the unclosed 'a stays a lifetime.
+fn lifetime_block<'a, 'b>(
+    x: &'a str,
+    y: &'b String,
+    c: char,
+    d: &'static Option<char>,
+) -> &'a str {
+    let quoted: char = 'q'; // a char literal, not a lifetime
+    let elided: &'_ str = x;
+    let tag = format!("'{}", quoted); // the ' here: a lifetime run
+    let joined = elided.to_owned() + &tag; // a String, so no return lifetime
+    drop((c, d, joined));
+    x
 }
 
 fn describe(points: &Vec<Point>) -> String {
@@ -96,5 +113,4 @@ fn main() {
 // 50E10    — uppercase E: one run, no valid number
 // 1f2      — one run, no valid number
 // 0b2, 0o8 — invalid binary, invalid octal
-// 'a     — unclosed quote: no closing quote, so the run is a lifetime
 // '\' — unterminated literal: the escape eats the closing quote
