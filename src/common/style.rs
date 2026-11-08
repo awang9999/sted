@@ -10,7 +10,8 @@ use std::sync::Arc;
 /// sits on — in its own, stronger highlight, numbers in the digit
 /// color, keywords in the keyword color, common type names in the type
 /// color, literals and enum-variant names in the literal color, and
-/// character literals in the character color.
+/// character literals in the character color. Lifetime specifiers are
+/// drawn in the lifetime color.
 ///
 /// This is the palette of the buffer's styling: a syntax coloring pass
 /// (keywords, strings, comments, ...) adds to it, and the view learns to
@@ -39,6 +40,10 @@ pub enum Style {
     /// A character literal: the opening quote, its interior, and the
     /// closing quote: drawn in the character color.
     Char,
+    /// A lifetime specifier: the quote that opens a lifetime name and
+    /// the name itself — `'static`, `'_`, `'a_b2` —: drawn in the
+    /// lifetime color.
+    Lifetime,
 }
 
 /// The styling of one line of a buffer: the grapheme spans that carry a
@@ -154,6 +159,21 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// at most one escape is honored, and only in that position. The quotes
 /// pair naively, left to right, so an apostrophe in prose pairs with
 /// the next quote on the line. A quote with no closer styles nothing.
+///
+/// Lifetime specifiers are styled too: a quote that opens no character
+/// literal and is directly followed by at least one ASCII identifier
+/// character — a letter, a digit, or an underscore — is one, and the
+/// span covers the quote plus the maximal run of such characters that
+/// follows it: `'static`, `'_`, and `'a_b2` all carry
+/// [`Style::Lifetime`]. A quote at the end of a line, or one followed
+/// by a space, punctuation, or a non-ASCII character, is no lifetime.
+/// The lifetime spans are added after the character-literal spans on
+/// purpose: a character literal like `'a'` claims its closing quote, so
+/// the `'a` inside it is not read as a lifetime, and a quote the
+/// character scan left unpaired — an unclosed `'a` — is still a
+/// lifetime. As with the character literals, the pairing is naive: an
+/// apostrophe in prose that opens no literal starts a lifetime run of
+/// whatever identifier characters follow it on the line.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -201,11 +221,13 @@ fn advance_past_literals(
     limit: usize,
     line: &Line,
     style: &mut LineStyle,
+    char_spans: &mut Vec<Range<usize>>,
 ) -> usize {
     let mut position = position;
     while position < limit {
         if let Some(end) = line.char_literal_end(position) {
             style.add(position..end, Style::Char);
+            char_spans.push(position..end);
             position = end;
             continue;
         }
@@ -235,9 +257,11 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
 
     /// A digit style over each of the line's numbers, the style of each
     /// of its words that is a keyword, a common type name, or a literal
-    /// or enum-variant name, and the character style over each
-    /// character literal — the opening quote, its interior, and its
-    /// closing quote.
+    /// or enum-variant name, the character style over each character
+    /// literal — the opening quote, its interior, and its closing
+    /// quote — and the lifetime style over each lifetime specifier —
+    /// a quote that opens no character literal, followed by a run of
+    /// identifier characters.
     ///
     /// The spans land in two phases, and a later span wins an overlap:
     /// first the digit spans, then the word spans — so a type like
@@ -261,8 +285,9 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         // over the digit spans of its inner digits.
         let words = line.word_spans();
         let mut position = 0;
+        let mut char_spans: Vec<Range<usize>> = Vec::new();
         for span in &words {
-            position = advance_past_literals(position, span.start, line, &mut style);
+            position = advance_past_literals(position, span.start, line, &mut style, &mut char_spans);
             if position > span.start {
                 // The word is inside a character literal: its opening
                 // quote claimed it, so it carries no style of its own.
@@ -276,7 +301,22 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         }
         // A quote may open a literal in the plain tail after the last
         // word too.
-        advance_past_literals(position, line.grapheme_count(), line, &mut style);
+        advance_past_literals(position, line.grapheme_count(), line, &mut style, &mut char_spans);
+        // The lifetime spans are added after all the character spans,
+        // and in line order, on purpose: a quote the character scan
+        // left unpaired — an unclosed `'a` — still starts a lifetime
+        // run, and a lifetime span that falls inside a character
+        // literal is dropped instead: the literal's closing quote is
+        // not the quote a lifetime opens, so a literal like `'a'` stays
+        // fully a character, with no lifetime span added for the `'a`
+        // inside it. Where a lifetime span does overlap another span,
+        // the later span wins the overlap, as it does for the word
+        // styles.
+        for span in line.lifetime_spans() {
+            if !char_spans.iter().any(|c| c.contains(&span.start)) {
+                style.add(span, Style::Lifetime);
+            }
+        }
         style
     }
 }
@@ -860,7 +900,9 @@ mod tests {
             &[(0..2, Style::Char)],
             &[(0..4, Style::Char)],
             &[],
-            &[],
+            // Unclosed quote: the character scan finds no closer, so
+            // the quote and the run after it are a lifetime.
+            &[(0..2, Style::Lifetime)],
             &[(0..2, Style::Char)],
             &[(0..3, Style::Char)],
             // Documented naive pairing: the apostrophe of `it's` pairs
@@ -887,8 +929,9 @@ mod tests {
             ],
             // The string literal's apostrophe is the line's only quote:
             // the double quotes are no quotes to the character-literal
-            // rule, so it pairs with nothing and stays plain.
-            &[(0..3, Style::Keyword)],
+            // rule, so it pairs with nothing; the run after it is a
+            // lifetime.
+            &[(0..3, Style::Keyword), (11..13, Style::Lifetime)],
         ];
         assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
         for (line, want) in lines.iter().zip(expected.iter().copied()) {
@@ -898,6 +941,251 @@ mod tests {
                 "line: {line}"
             );
         }
+    }
+
+    #[test]
+    fn the_rust_lifetimes_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/rust_lifetimes.txt pins the
+        // lifetime-specifier styling: every required edge case, plus
+        // realistic Rust lines. The file is plain text, so the test
+        // drives the highlighter directly rather than going through the
+        // file type.
+        let lines: Vec<Line> =
+            fixture_content("rust_lifetimes.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            &[(0..7, Style::Lifetime)],
+            &[(0..2, Style::Lifetime)],
+            &[(0..6, Style::Lifetime)],
+            &[],
+            &[],
+            &[],
+            &[(0..3, Style::Char)],
+            &[(0..4, Style::Char)],
+            // Unclosed literal: the character scan finds no closer, so
+            // the quote and the run after it are a lifetime.
+            &[(0..2, Style::Lifetime)],
+            // The whole thing is one character literal: the interior
+            // `static` is never read as a lifetime.
+            &[(0..8, Style::Char)],
+            // `f<'a>`: the `<'a>` is one character literal under the
+            // naive pairing, so no lifetime span lands inside it; the
+            // `&'static` is a lifetime, added after the word spans.
+            &[
+                (0..2, Style::Keyword),
+                (17..26, Style::Char),
+                (28..31, Style::Type),
+                (45..48, Style::Type),
+                (37..44, Style::Lifetime),
+            ],
+            &[
+                (0..3, Style::Keyword),
+                (16..19, Style::Type),
+                (8..15, Style::Lifetime),
+            ],
+            // `f<'a>` is one character literal under the naive
+            // pairing: the apostrophe of `f<'a>` pairs with the quote
+            // of the first `&'a`, so the literal runs over both; the
+            // second `&'a` is a lifetime, added after the word spans.
+            &[
+                (0..2, Style::Keyword),
+                (5..14, Style::Char),
+                (16..19, Style::Type),
+                (28..31, Style::Type),
+                (25..27, Style::Lifetime),
+            ],
+            // `g<'a, 'b>`: the first quote pairs with the second, so the
+            // literal runs over both names; the third quote pairs with
+            // the quote of the first `&'a`, and the rest is plain text.
+            &[
+                (0..2, Style::Keyword),
+                (5..10, Style::Char),
+                (17..30, Style::Char),
+                (32..35, Style::Type),
+            ],
+            // The apostrophe of `it's` opens no literal, so the run
+            // after it is a lifetime: the quote plus the single letter
+            // `s`, the naive-pairing consequence.
+            &[(2..4, Style::Lifetime)],
+            // The apostrophe is not at the start of a word and is
+            // followed by a run: it is a lifetime specifier too, the
+            // maximal run included.
+            &[(3..7, Style::Lifetime)],
+            // The apostrophe opens no literal, and the run after it is
+            // a keyword: the lifetime span is added after the keyword
+            // span and wins the overlap of it.
+            &[
+                (1..5, Style::Keyword),
+                (0..5, Style::Lifetime),
+            ],
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        for (line, want) in lines.iter().zip(expected.iter().copied()) {
+            assert_eq!(
+                highlighter.base_style(line).spans(),
+                want,
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_lifetime_specifier() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'static");
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(0..7, Style::Lifetime)]);
+        for i in 0..7 {
+            assert_eq!(style.at(i), Style::Lifetime, "grapheme {i} of 'static");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_an_elided_lifetime() {
+        let highlighter = RustSyntaxHighlighter;
+        assert_eq!(
+            highlighter.base_style(&Line::from("'_")).spans(),
+            &[(0..2, Style::Lifetime)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_lifetime_run_with_digits_and_underscores() {
+        let highlighter = RustSyntaxHighlighter;
+        // The run after the quote is maximal: digits and underscores
+        // are lifetime-name characters, and the whole run is styled.
+        let line = Line::from("'a1_b2");
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(0..6, Style::Lifetime)]);
+        for i in 0..6 {
+            assert_eq!(style.at(i), Style::Lifetime, "grapheme {i} of 'a1_b2");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_style_a_quote_without_a_run() {
+        let highlighter = RustSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        // A quote at the end of the line starts no run.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'")).spans(),
+            no_spans
+        );
+        // A non-ASCII follower starts no run: the class is ASCII-only.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'\u{e9}")).spans(),
+            no_spans
+        );
+        // A space follower starts no run.
+        assert_eq!(
+            highlighter.base_style(&Line::from("' ")).spans(),
+            no_spans
+        );
+        // A dot after the quote is not a run character.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'.x")).spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_keeps_character_literals_characters() {
+        let highlighter = RustSyntaxHighlighter;
+        // A closed literal is a character, not a lifetime: the closing
+        // quote is claimed by the character scan, so the `'a` inside it
+        // is never read as a lifetime.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'a'")).spans(),
+            &[(0..3, Style::Char)]
+        );
+        // The escaped quote is inside the literal, so no lifetime span
+        // is added within it either.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'\\''")).spans(),
+            &[(0..4, Style::Char)]
+        );
+        // `static` inside a closed literal is not a lifetime: the whole
+        // thing is one character.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'static'")).spans(),
+            &[(0..8, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_an_unclosed_quote_as_a_lifetime() {
+        let highlighter = RustSyntaxHighlighter;
+        // No closing quote: the character scan consumes nothing, so the
+        // quote and its run are a lifetime.
+        let line = Line::from("'a");
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(0..2, Style::Lifetime)]);
+        assert_eq!(style.at(0), Style::Lifetime);
+        assert_eq!(style.at(1), Style::Lifetime);
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_lifetimes_in_realistic_lines() {
+        let highlighter = RustSyntaxHighlighter;
+        // The `&` stays plain; `'static` is a lifetime, `str` a type.
+        let style =
+            highlighter.base_style(&Line::from("let x: &'static str;"));
+        assert_eq!(
+            style.spans(),
+            &[
+                (0..3, Style::Keyword),
+                (16..19, Style::Type),
+                (8..15, Style::Lifetime),
+            ]
+        );
+        for i in 8..15 {
+            assert_eq!(style.at(i), Style::Lifetime, "grapheme {i}");
+        }
+        assert_eq!(style.at(7), Style::None, "the & stays plain");
+
+        let style = highlighter.base_style(&Line::from("-> &'_ str"));
+        assert_eq!(
+            style.spans(),
+            &[(7..10, Style::Type), (4..6, Style::Lifetime)]
+        );
+    }
+
+    #[test]
+    fn a_lifetime_span_wins_the_overlap_when_added_after_a_char_span() {
+        // The overlap rule itself: a lifetime span added after a char
+        // span wins the graphemes it covers.
+        let mut layered = LineStyle::new();
+        layered.add(0..4, Style::Char);
+        layered.add(2..5, Style::Lifetime);
+        assert_eq!(layered.at(0), Style::Char);
+        assert_eq!(layered.at(2), Style::Lifetime);
+        assert_eq!(layered.at(4), Style::Lifetime);
+
+        // The same ordering the highlighter uses: the lifetime spans
+        // are added after the character spans, so where they overlap
+        // the lifetime wins.
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("it's");
+        // The apostrophe of `it's` is the lifetime's quote; the run
+        // after it is `s`, so the lifetime span is 2..4 — the same span
+        // the character scan would have added if the quote had a closer.
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(2..4, Style::Lifetime)]);
+        for i in 2..4 {
+            assert_eq!(style.at(i), Style::Lifetime, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_style_lifetimes_in_plain_text() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter
+                .base_style(&Line::from("fn f<'a>(s: &'a str) -> &'static str"))
+                .spans(),
+            no_spans
+        );
     }
 
     #[test]
@@ -1006,15 +1294,13 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_highlighter_does_not_style_an_unpaired_quote() {
+    fn the_rust_highlighter_does_not_style_an_unpaired_quote_as_a_character() {
         let highlighter = RustSyntaxHighlighter;
         let no_spans: &[(Range<usize>, Style)] = &[];
         assert_eq!(highlighter.base_style(&Line::from("'")).spans(), no_spans);
-        // The interior is a word, but there is no closing quote: the
-        // quote stays plain and the word carries no style either.
-        assert_eq!(highlighter.base_style(&Line::from("'a")).spans(), no_spans);
         // A line that ends in the escape: the backslash escapes past
-        // the end of the line, so there is no closer.
+        // the end of the line, so there is no closer, and the backslash
+        // is not a lifetime-name character, so no lifetime either.
         assert_eq!(highlighter.base_style(&Line::from("'\\")).spans(), no_spans);
     }
 

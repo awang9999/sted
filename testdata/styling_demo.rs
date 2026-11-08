@@ -7,6 +7,7 @@
 //   purple      literals & variants (Some, None, Ok, Err, true, false)
 //   steel blue  numbers           (42, 3.14, 50e10, 0x1f, 0b1010, 0o17)
 //   amber       character literals ('a', '\'' , 'é')
+//   teal        lifetime specifiers ('static, '_, 'a_b2)
 //
 // Nothing below should be colored (see the last comment block).
 
@@ -31,6 +32,20 @@ fn char_code(c: char) -> u8 {
 fn pairing() -> char {
     let note = "don't panic: 'ok'"; // naive: the apostrophe pairs with the next quote
     note.chars().next().unwrap_or('?')
+}
+
+fn lifetime_demo<'a>(s: &'a str) -> &'static str {
+    s
+}
+
+fn elided(s: &'_ str) -> &'_ str {
+    s
+}
+
+// The apostrophe below opens no character literal, so the run after it
+// is read as a lifetime: a naive-pairing consequence, pinned here.
+fn possessive(owner: &str) -> &str {
+    &format!("owner's name: {owner}")
 }
 
 fn describe(points: &Vec<Point>) -> String {
@@ -81,5 +96,5 @@ fn main() {
 // 50E10    — uppercase E: one run, no valid number
 // 1f2      — one run, no valid number
 // 0b2, 0o8 — invalid binary, invalid octal
-// 'a     — unclosed quote: no closing quote, no color
+// 'a     — unclosed quote: no closing quote, so the run is a lifetime
 // '\' — unterminated literal: the escape eats the closing quote

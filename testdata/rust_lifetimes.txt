@@ -1,0 +1,17 @@
+'static
+'_
+'a1_b2
+'
+'é
+'
+'a'
+'\''
+'a
+'static'
+fn lifetime_demo<'a>(s: &'a str) -> &'static str {
+let x: &'static str;
+fn f<'a>(s: &'a str) -> &'a str
+fn g<'a, 'b>(a: &'a str, b: &'b str)
+it's
+foo'bar
+'self

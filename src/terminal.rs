@@ -250,6 +250,26 @@ impl Terminal {
         Self::print(&styled_str)
     }
 
+    /// Prints a lifetime specifier at the cursor's current position in
+    /// teal text, with no background, continuing the row rather than
+    /// rewriting it. The teal is the only color in the palette that is
+    /// green and blue in equal measure: no other color carries both
+    /// channels at anything near full strength, so it stays apart from
+    /// the green types and the blues of the digits and keywords.
+    pub fn print_lifetime(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 0,
+                g: 200,
+                b: 200,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a search match at the cursor's current position: black text
     /// on a warm mid-gray background, continuing the row rather than
     /// rewriting it. The warm gray carries a subtle yellow tinge, bright

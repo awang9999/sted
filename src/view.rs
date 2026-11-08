@@ -278,6 +278,9 @@ impl View {
                 Style::Char => {
                     let _ = Terminal::print_char(&text);
                 }
+                Style::Lifetime => {
+                    let _ = Terminal::print_lifetime(&text);
+                }
             }
         }
     }

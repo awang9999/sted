@@ -177,6 +177,46 @@ impl Line {
         runs
     }
 
+    /// The grapheme spans of the line's lifetime specifiers, in the
+    /// order they occur in the line. A lifetime specifier is a quote
+    /// directly followed by at least one ASCII identifier character —
+    /// a letter, a digit, or an underscore — and the span covers the
+    /// quote plus the maximal such run that follows it: `'a_b2` is
+    /// five graphemes, `'static` is seven, `'_` is two. A quote at the
+    /// end of the line, or one followed by anything else — a space,
+    /// punctuation, a non-ASCII character — starts no run, so its
+    /// quote stays unreported.
+    ///
+    /// The character class is deliberately ASCII-only, like the word
+    /// matcher: a lifetime name is one the compiler accepts, and every
+    /// one worth styling is ASCII, so `'é` is no lifetime.
+    ///
+    /// The scan knows every quote on the line; deciding which of them
+    /// belong to a character literal — and therefore are not the start
+    /// of a lifetime — is left to the structure that owns the buffer's
+    /// styling, which styles the character literals first.
+    pub fn lifetime_spans(&self) -> Vec<Range<usize>> {
+        let mut spans = Vec::new();
+        let len = self.fragments.len();
+        let mut index = 0;
+        while index < len {
+            if self.is_quote(index) {
+                let after = index.saturating_add(1);
+                if after < len && self.is_word_char(after) {
+                    let mut end = after;
+                    while end < len && self.is_word_char(end) {
+                        end = end.saturating_add(1);
+                    }
+                    spans.push(index..end);
+                    index = end;
+                    continue;
+                }
+            }
+            index = index.saturating_add(1);
+        }
+        spans
+    }
+
     /// The grapheme index just past the closing quote of the character
     /// literal that opens at grapheme `open` — the exclusive end of the
     /// whole literal: its opening quote, its interior, and its closing
@@ -1319,6 +1359,59 @@ mod tests {
         let line = Line::from("'a'");
         assert_eq!(line.char_literal_end(3), None);
         assert_eq!(line.char_literal_end(100), None);
+    }
+
+    #[test]
+    fn lifetime_spans_of_an_empty_line_is_empty() {
+        let line = Line::from("");
+        assert_eq!(line.lifetime_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn lifetime_spans_cover_the_quote_and_the_whole_run_after_it() {
+        // 'static is seven graphemes: the quote plus the maximal run of
+        // identifier characters.
+        let line = Line::from("'static");
+        assert_eq!(line.lifetime_spans(), vec![0..7]);
+        // Digits and underscores are run characters: the run is maximal.
+        let line = Line::from("'a1_b2");
+        assert_eq!(line.lifetime_spans(), vec![0..6]);
+        // An underscore alone is a run: ' is two graphemes.
+        let line = Line::from("'_");
+        assert_eq!(line.lifetime_spans(), vec![0..2]);
+    }
+
+    #[test]
+    fn lifetime_spans_of_a_quote_without_a_run_is_empty() {
+        let no_spans = Vec::<Range<usize>>::new();
+        // A quote at the end of the line starts no run.
+        assert_eq!(Line::from("'").lifetime_spans(), no_spans);
+        // A space follower starts no run.
+        assert_eq!(Line::from("' ").lifetime_spans(), no_spans);
+        // A dot after the quote is not a run character.
+        assert_eq!(Line::from("'.x").lifetime_spans(), no_spans);
+    }
+
+    #[test]
+    fn lifetime_spans_of_a_non_ascii_follower_is_empty() {
+        // é is not an ASCII identifier character, so the run is empty
+        // and the quote stays unreported.
+        let line = Line::from("'\u{e9}");
+        assert_eq!(line.lifetime_spans(), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn lifetime_spans_find_each_quote_with_a_run_in_line_order() {
+        let line = Line::from("'a 'b");
+        assert_eq!(line.lifetime_spans(), vec![0..2, 3..5]);
+    }
+
+    #[test]
+    fn lifetime_spans_of_a_multibyte_line_works_in_grapheme_space() {
+        // é is one grapheme: the quote before it is not a lifetime, and
+        // the 'a' after it is, measured in graphemes.
+        let line = Line::from("'\u{e9} 'a");
+        assert_eq!(line.lifetime_spans(), vec![3..5]);
     }
 
     #[test]
