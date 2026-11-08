@@ -142,6 +142,14 @@ impl Line {
             .collect()
     }
 
+    /// Whether the grapheme at `grapheme_index` is the quote that opens
+    /// and closes a character literal. A multi-char cluster like a
+    /// keycap emoji is not one.
+    fn is_quote(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        text == "'"
+    }
+
     /// The grapheme spans of the line's words, in the order they occur
     /// in the line. A word is one maximal run of ASCII identifier
     /// characters (`[A-Za-z0-9_]`), and every run is reported, whatever
@@ -167,6 +175,46 @@ impl Line {
             runs.push(start..self.fragments.len());
         }
         runs
+    }
+
+    /// The grapheme index just past the closing quote of the character
+    /// literal that opens at grapheme `open` — the exclusive end of the
+    /// whole literal: its opening quote, its interior, and its closing
+    /// quote — or `None` when the grapheme at `open` is not a quote, or
+    /// when the line carries no closing quote for it.
+    ///
+    /// The scan works in grapheme space: it starts at the grapheme
+    /// after the opening quote, skips the grapheme a backslash directly
+    /// after the opening quote escapes, and takes the next quote it
+    /// finds as the closer. Two deliberate simplifications:
+    ///
+    /// - at most one escape, sitting directly after the opening quote —
+    ///   the form of a quoted quote. A backslash anywhere else is no
+    ///   escape: the scan stops at the very next quote it finds;
+    /// - the quotes pair naively, left to right: the next quote on the
+    ///   line closes the literal whatever it is, so an apostrophe in
+    ///   prose pairs with the quote that follows it.
+    ///
+    /// For a literal whose interior is pure ASCII, the returned index
+    /// equals the byte index just past the closing quote. An `open` past
+    /// the end of the line yields `None`.
+    pub fn char_literal_end(&self, open: usize) -> Option<usize> {
+        if open >= self.fragments.len() || !self.is_quote(open) {
+            return None;
+        }
+        let mut index = open.saturating_add(1);
+        // A backslash directly after the opening quote escapes the
+        // grapheme it precedes — the one escape the literal may carry.
+        if index < self.fragments.len() && self.display_text_of(index) == "\\" {
+            index = index.saturating_add(2);
+        }
+        while index < self.fragments.len() {
+            if self.is_quote(index) {
+                return Some(index.saturating_add(1));
+            }
+            index = index.saturating_add(1);
+        }
+        None
     }
 
     /// The text of the grapheme run from `start` to (exclusive) `end`
@@ -1193,6 +1241,84 @@ mod tests {
         let no_spans = Vec::<Range<usize>>::new();
         assert_eq!(Line::from("1f2").number_spans(), no_spans);
         assert_eq!(Line::from("abc123def").number_spans(), no_spans);
+    }
+
+    #[test]
+    fn char_literal_end_of_a_plain_char_literal_is_past_the_closing_quote() {
+        let line = Line::from("'a'");
+        assert_eq!(line.char_literal_end(0), Some(3));
+    }
+
+    #[test]
+    fn char_literal_end_of_an_empty_literal_covers_the_two_quotes() {
+        let line = Line::from("''");
+        assert_eq!(line.char_literal_end(0), Some(2));
+    }
+
+    #[test]
+    fn char_literal_end_of_a_quoted_quote_is_past_the_last_quote() {
+        // The backslash escapes the quote it precedes, so the closer is
+        // the very last quote.
+        let line = Line::from("'\\''");
+        assert_eq!(line.char_literal_end(0), Some(4));
+    }
+
+    #[test]
+    fn char_literal_end_of_a_lone_quote_is_none() {
+        let line = Line::from("'");
+        assert_eq!(line.char_literal_end(0), None);
+    }
+
+    #[test]
+    fn char_literal_end_without_a_closing_quote_is_none() {
+        let line = Line::from("'a");
+        assert_eq!(line.char_literal_end(0), None);
+    }
+
+    #[test]
+    fn char_literal_end_of_a_triple_quote_covers_the_first_two() {
+        let line = Line::from("'''");
+        assert_eq!(line.char_literal_end(0), Some(2));
+        // The third quote opens no literal: it has no closer.
+        assert_eq!(line.char_literal_end(2), None);
+    }
+
+    #[test]
+    fn char_literal_end_scans_a_multibyte_interior_in_grapheme_space() {
+        // 'é' is two bytes in UTF-8 but one grapheme, so the literal
+        // ends at grapheme 3, not byte 4.
+        let line = Line::from("'é'");
+        assert_eq!(line.char_literal_end(0), Some(3));
+    }
+
+    #[test]
+    fn char_literal_end_of_a_line_ending_in_the_escape_is_none() {
+        // The backslash escapes past the end of the line: there is no
+        // closer.
+        let line = Line::from("'\\");
+        assert_eq!(line.char_literal_end(0), None);
+    }
+
+    #[test]
+    fn char_literal_end_of_a_backslash_literal_covers_the_whole_run() {
+        // The backslash directly after the opening quote escapes the
+        // grapheme it precedes — the second backslash — so the closer is
+        // the last quote.
+        let line = Line::from("'\\\\'");
+        assert_eq!(line.char_literal_end(0), Some(4));
+    }
+
+    #[test]
+    fn char_literal_end_at_a_non_quote_grapheme_is_none() {
+        let line = Line::from("abc");
+        assert_eq!(line.char_literal_end(0), None);
+    }
+
+    #[test]
+    fn char_literal_end_past_the_end_of_the_line_is_none() {
+        let line = Line::from("'a'");
+        assert_eq!(line.char_literal_end(3), None);
+        assert_eq!(line.char_literal_end(100), None);
     }
 
     #[test]

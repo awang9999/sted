@@ -231,6 +231,25 @@ impl Terminal {
         Self::print(&styled_str)
     }
 
+    /// Prints a character literal at the cursor's current position in
+    /// amber text, with no background, continuing the row rather than
+    /// rewriting it. The warm amber carries no blue at all, so it stays
+    /// apart from the blues, the green, and the violet of the other
+    /// colors in the palette.
+    pub fn print_char(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 255,
+                g: 191,
+                b: 0,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a search match at the cursor's current position: black text
     /// on a warm mid-gray background, continuing the row rather than
     /// rewriting it. The warm gray carries a subtle yellow tinge, bright

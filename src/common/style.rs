@@ -9,7 +9,8 @@ use std::sync::Arc;
 /// matches in the match highlight, the active match — the one the caret
 /// sits on — in its own, stronger highlight, numbers in the digit
 /// color, keywords in the keyword color, common type names in the type
-/// color, and literals and enum-variant names in the literal color.
+/// color, literals and enum-variant names in the literal color, and
+/// character literals in the character color.
 ///
 /// This is the palette of the buffer's styling: a syntax coloring pass
 /// (keywords, strings, comments, ...) adds to it, and the view learns to
@@ -35,6 +36,9 @@ pub enum Style {
     /// A literal or enum-variant name — a boolean literal or a variant
     /// of a common standard-library enum: drawn in the literal color.
     Literal,
+    /// A character literal: the opening quote, its interior, and the
+    /// closing quote: drawn in the character color.
+    Char,
 }
 
 /// The styling of one line of a buffer: the grapheme spans that carry a
@@ -141,6 +145,15 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// word spans are added after the number spans, so a type like `u128`
 /// or `i8` wins the overlap of its inner digit spans and renders fully
 /// in the type color.
+///
+/// Character literals are styled too: everything from an opening quote
+/// to its closing quote — the opening quote, the interior, and the
+/// closing quote — carries [`Style::Char`], whatever the interior is.
+/// A backslash directly after the opening quote escapes the grapheme it
+/// precedes, so it is not the closing quote (`'\''` is one literal);
+/// at most one escape is honored, and only in that position. The quotes
+/// pair naively, left to right, so an apostrophe in prose pairs with
+/// the next quote on the line. A quote with no closer styles nothing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -178,6 +191,29 @@ const TYPES: &[&str] = &[
 /// variants of the most common standard-library enums.
 const LITERALS: &[&str] = &["Some", "None", "Ok", "Err", "true", "false"];
 
+/// The position the scan resumes from after walking the plain graphemes
+/// from `position` up to (exclusive) `limit`: a quote that opens a
+/// character literal claims everything up to the literal's end — the
+/// grapheme just past its closing quote — and the remaining graphemes
+/// stay plain.
+fn advance_past_literals(
+    position: usize,
+    limit: usize,
+    line: &Line,
+    style: &mut LineStyle,
+) -> usize {
+    let mut position = position;
+    while position < limit {
+        if let Some(end) = line.char_literal_end(position) {
+            style.add(position..end, Style::Char);
+            position = end;
+            continue;
+        }
+        position = position.saturating_add(1);
+    }
+    position
+}
+
 /// The style a whole word carries under the Rust rules: the style of
 /// the list the word is in, or `None` when it is in no list.
 fn style_of_word(word: &str) -> Option<Style> {
@@ -197,24 +233,50 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         Self::FILE_TYPE
     }
 
-    /// A digit style over each of the line's numbers, and the style of
-    /// each of its words that is a keyword, a common type name, or a
-    /// literal or enum-variant name.
+    /// A digit style over each of the line's numbers, the style of each
+    /// of its words that is a keyword, a common type name, or a literal
+    /// or enum-variant name, and the character style over each
+    /// character literal — the opening quote, its interior, and its
+    /// closing quote.
+    ///
+    /// The spans land in two phases, and a later span wins an overlap:
+    /// first the digit spans, then the word spans — so a type like
+    /// `u128` or `i8` renders fully in the type color, over the digit
+    /// spans of its inner digits. The words and the character literals
+    /// are found in one scan, in line order: a word run that is in one
+    /// of the lists carries that list's style, and a quote that opens a
+    /// character literal hands the scan to the literal parser, whose
+    /// end — the grapheme just past the closing quote — is where the
+    /// scan resumes. The interior words of a literal are never visited,
+    /// so no word or keyword span is ever added inside one, and a
+    /// literal's span wins the overlap of any digit spans inside it.
     fn base_style(&self, line: &Line) -> LineStyle {
         let mut style = LineStyle::new();
         for span in line.number_spans() {
             style.add(span, Style::Digit);
         }
-        // The word spans are added after the number spans on purpose:
-        // a later span wins an overlap, so a type like `u128` or `i8`
-        // renders fully in the type color, over the digit spans of its
-        // inner digits.
-        for span in line.word_spans() {
+        // The word and character-literal spans are added after the
+        // number spans on purpose: a later span wins an overlap, so a
+        // type like `u128` or `i8` renders fully in the type color,
+        // over the digit spans of its inner digits.
+        let words = line.word_spans();
+        let mut position = 0;
+        for span in &words {
+            position = advance_past_literals(position, span.start, line, &mut style);
+            if position > span.start {
+                // The word is inside a character literal: its opening
+                // quote claimed it, so it carries no style of its own.
+                continue;
+            }
             let word = line.run_text(span.start, span.end);
             if let Some(word_style) = style_of_word(word) {
-                style.add(span, word_style);
+                style.add(span.clone(), word_style);
             }
+            position = span.end;
         }
+        // A quote may open a literal in the plain tail after the last
+        // word too.
+        advance_past_literals(position, line.grapheme_count(), line, &mut style);
         style
     }
 }
@@ -784,6 +846,61 @@ mod tests {
     }
 
     #[test]
+    fn the_rust_chars_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/rust_chars.txt pins the
+        // character-literal styling: every pinned edge case, plus
+        // realistic Rust lines. The file is plain text, so the test
+        // drives the highlighter directly rather than going through the
+        // file type.
+        let lines: Vec<Line> =
+            fixture_content("rust_chars.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            &[(0..3, Style::Char)],
+            &[(0..2, Style::Char)],
+            &[(0..4, Style::Char)],
+            &[],
+            &[],
+            &[(0..2, Style::Char)],
+            &[(0..3, Style::Char)],
+            // Documented naive pairing: the apostrophe of `it's` pairs
+            // with the opening quote of `'test'`.
+            &[(2..8, Style::Char)],
+            &[(0..4, Style::Char)],
+            &[(0..3, Style::Char), (6..9, Style::Char)],
+            &[],
+            &[(0..4, Style::Char)],
+            &[(0..20, Style::Char)],
+            &[(0..3, Style::Keyword), (7..11, Style::Type), (14..17, Style::Char)],
+            &[
+                (0..2, Style::Keyword),
+                (17..23, Style::Type),
+                (24..28, Style::Type),
+                (32..36, Style::Literal),
+                (37..40, Style::Char),
+            ],
+            &[
+                (17..18, Style::Digit),
+                (25..26, Style::Digit),
+                (0..5, Style::Keyword),
+                (10..13, Style::Char),
+            ],
+            // The string literal's apostrophe is the line's only quote:
+            // the double quotes are no quotes to the character-literal
+            // rule, so it pairs with nothing and stays plain.
+            &[(0..3, Style::Keyword)],
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        for (line, want) in lines.iter().zip(expected.iter().copied()) {
+            assert_eq!(
+                highlighter.base_style(line).spans(),
+                want,
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn the_rust_highlighter_styles_keywords() {
         let highlighter = RustSyntaxHighlighter;
         let line = Line::from("if x { }");
@@ -865,6 +982,114 @@ mod tests {
     }
 
     #[test]
+    fn the_rust_highlighter_styles_a_character_literal_including_its_quotes() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'a'");
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(0..3, Style::Char)]);
+        for i in 0..3 {
+            assert_eq!(style.at(i), Style::Char, "grapheme {i} of 'a'");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_an_escaped_quote_as_one_literal() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'\\''");
+        let style = highlighter.base_style(&line);
+        // The backslash escapes the quote it precedes, so the literal
+        // runs to the very last quote: four graphemes, all Char.
+        assert_eq!(style.spans(), &[(0..4, Style::Char)]);
+        for i in 0..4 {
+            assert_eq!(style.at(i), Style::Char, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_style_an_unpaired_quote() {
+        let highlighter = RustSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(highlighter.base_style(&Line::from("'")).spans(), no_spans);
+        // The interior is a word, but there is no closing quote: the
+        // quote stays plain and the word carries no style either.
+        assert_eq!(highlighter.base_style(&Line::from("'a")).spans(), no_spans);
+        // A line that ends in the escape: the backslash escapes past
+        // the end of the line, so there is no closer.
+        assert_eq!(highlighter.base_style(&Line::from("'\\")).spans(), no_spans);
+    }
+
+    #[test]
+    fn the_rust_highlighter_pairs_quotes_naively_left_to_right() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("it's a 'test'");
+        // Documented naive-pairing behavior: the apostrophe of `it's`
+        // opens the literal and the opening quote of `'test'` closes it,
+        // so the span runs from the apostrophe to that quote.
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(2..8, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_adds_no_keyword_span_inside_a_character_literal() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'if'");
+        let style = highlighter.base_style(&line);
+        // The whole literal is one Char span; the `if` inside it is
+        // skipped by the scan, so no keyword span is added.
+        assert_eq!(style.spans(), &[(0..4, Style::Char)]);
+        for i in 0..4 {
+            assert_eq!(style.at(i), Style::Char, "grapheme {i} of 'if'");
+        }
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_each_of_two_character_literals() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'a' + 'b'");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..3, Style::Char), (6..9, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_multibyte_character_literal_in_grapheme_space() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'é'");
+        let style = highlighter.base_style(&line);
+        // 'é' is two bytes in UTF-8 but one grapheme, so the literal is
+        // three graphemes wide.
+        assert_eq!(style.spans(), &[(0..3, Style::Char)]);
+        assert_eq!(style.at(1), Style::Char);
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_check_the_interior_of_a_character_literal() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("'definitelynotachar'");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..20, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_realistic_char_binding_line() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("let c: char = 'a';");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[
+                (0..3, Style::Keyword),
+                (7..11, Style::Type),
+                (14..17, Style::Char),
+            ]
+        );
+    }
+
+    #[test]
     fn a_type_name_wins_the_overlap_with_its_inner_digit_span() {
         let highlighter = RustSyntaxHighlighter;
         // The inner digits of `i8` and `u128` are number runs, so they
@@ -898,6 +1123,16 @@ mod tests {
             highlighter
                 .base_style(&Line::from("if let Some(x) = y { 1 }"))
                 .spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_plain_text_highlighter_does_not_style_character_literals() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("'a' it's 'test'")).spans(),
             no_spans
         );
     }

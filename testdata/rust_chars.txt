@@ -1,0 +1,17 @@
+'a'
+''
+'\''
+'
+'a
+'''
+'é'
+it's a 'test'
+'if'
+'a' + 'b'
+'\
+'\\'
+'definitelynotachar'
+let c: char = 'a';
+fn fallback() -> Option<char> { Some('?') }
+match c { 'a' => 1, _ => 0 }
+let s = "it's fine";

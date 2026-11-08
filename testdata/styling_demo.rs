@@ -6,6 +6,7 @@
 //                                  char, Option, Result, String, str, Vec)
 //   purple      literals & variants (Some, None, Ok, Err, true, false)
 //   steel blue  numbers           (42, 3.14, 50e10, 0x1f, 0b1010, 0o17)
+//   amber       character literals ('a', '\'' , 'é')
 //
 // Nothing below should be colored (see the last comment block).
 
@@ -16,6 +17,14 @@ pub struct Point {
 
 fn first_char(s: &str) -> Option<char> {
     s.chars().next()
+}
+
+fn char_code(c: char) -> u8 {
+    match c {
+        'a' => 1,
+        'é' => 2,
+        _ => 0,
+    }
 }
 
 fn describe(points: &Vec<Point>) -> String {
@@ -66,3 +75,4 @@ fn main() {
 // 50E10    — uppercase E: one run, no valid number
 // 1f2      — one run, no valid number
 // 0b2, 0o8 — invalid binary, invalid octal
+// 'a     — unclosed quote: no closing quote, no color

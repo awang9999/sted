@@ -246,8 +246,8 @@ impl View {
     /// Draws one buffer row: the line's visible portion as display
     /// segments, each drawn according to the style its graphemes carry
     /// in `style` — plain, in the digit color, in the keyword, type, or
-    /// literal color, in the match highlight, or in the stronger
-    /// active-match highlight.
+    /// literal color, in the character color, in the match highlight, or
+    /// in the stronger active-match highlight.
     fn render_buffer_row(row: usize, line: &Line, range: &Range<usize>, style: &LineStyle) {
         // `clear_row` keeps the cursor's column; the segments must start
         // at the row's beginning.
@@ -274,6 +274,9 @@ impl View {
                 }
                 Style::Literal => {
                     let _ = Terminal::print_literal(&text);
+                }
+                Style::Char => {
+                    let _ = Terminal::print_char(&text);
                 }
             }
         }
