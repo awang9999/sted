@@ -145,7 +145,7 @@ impl Line {
     /// Whether the grapheme at `grapheme_index` is the quote that opens
     /// and closes a character literal. A multi-char cluster like a
     /// keycap emoji is not one.
-    fn is_quote(&self, grapheme_index: usize) -> bool {
+    pub(crate) fn is_quote(&self, grapheme_index: usize) -> bool {
         let text = self.display_text_of(grapheme_index);
         text == "'"
     }
@@ -232,8 +232,19 @@ impl Line {
     ///   the form of a quoted quote. A backslash anywhere else is no
     ///   escape: the scan stops at the very next quote it finds;
     /// - the quotes pair naively, left to right: the next quote on the
-    ///   line closes the literal whatever it is, so an apostrophe in
-    ///   prose pairs with the quote that follows it.
+    ///   line that opens no lifetime run closes the literal whatever
+    ///   it is, so an apostrophe in prose pairs with the quote that
+    ///   follows it;
+    /// - a quote that opens a lifetime run — an ASCII letter, digit,
+    ///   or underscore directly after it, with no closing quote for
+    ///   that run — never closes a literal: it belongs to the lifetime
+    ///   highlighting, which runs after the character highlighting.
+    ///   A quote whose run is itself closed by a quote (`'test'`) still
+    ///   closes: it is the opening of another character literal, not a
+    ///   lifetime. Without this, in
+    ///   `fn f<'a>(s: &'a str) -> &'static str` the first quote of the
+    ///   generics would pair with the quote of the second `'a` and
+    ///   swallow the stretch between them as one character literal.
     ///
     /// For a literal whose interior is pure ASCII, the returned index
     /// equals the byte index just past the closing quote. An `open` past
@@ -249,12 +260,36 @@ impl Line {
             index = index.saturating_add(2);
         }
         while index < self.fragments.len() {
-            if self.is_quote(index) {
+            if self.is_quote(index) && !self.starts_lifetime_run(index) {
                 return Some(index.saturating_add(1));
             }
             index = index.saturating_add(1);
         }
         None
+    }
+
+    /// Whether the quote at `grapheme_index` opens a lifetime run: an
+    /// ASCII letter, digit, or underscore directly after it, with the
+    /// run NOT immediately closed by a quote. Used by
+    /// [`Line::char_literal_end`] so such a quote is never taken as a
+    /// closer — it belongs to the lifetime highlighting. A quote whose
+    /// run is immediately followed by a quote (`'test'`) is no
+    /// lifetime: it opens another character literal. A multi-char
+    /// cluster like a keycap emoji is no run character.
+    pub(crate) fn starts_lifetime_run(&self, grapheme_index: usize) -> bool {
+        let after = grapheme_index.saturating_add(1);
+        if after >= self.fragments.len() || !self.is_word_char(after) {
+            return false;
+        }
+        let mut end = after;
+        while end < self.fragments.len() && self.is_word_char(end) {
+            end = end.saturating_add(1);
+        }
+        // The run is a lifetime only if the character right after it
+        // is not a quote: a quote immediately after the run means the
+        // run is the interior of a character literal, not a lifetime
+        // specifier.
+        end >= self.fragments.len() || !self.is_quote(end)
     }
 
     /// The text of the grapheme run from `start` to (exclusive) `end`
@@ -1301,6 +1336,60 @@ mod tests {
         // the very last quote.
         let line = Line::from("'\\''");
         assert_eq!(line.char_literal_end(0), Some(4));
+    }
+
+    #[test]
+    fn starts_lifetime_run_of_a_quote_followed_by_an_unclosed_run_is_true() {
+        // The run after the quote is not immediately closed by a quote,
+        // so the quote opens a lifetime run.
+        let line = Line::from("'static");
+        assert!(line.starts_lifetime_run(0));
+        let line = Line::from("'_");
+        assert!(line.starts_lifetime_run(0));
+        let line = Line::from("'a1_b2");
+        assert!(line.starts_lifetime_run(0));
+        // The run is followed by a space, not a quote: still a lifetime.
+        let line = Line::from("'a ");
+        assert!(line.starts_lifetime_run(0));
+    }
+
+    #[test]
+    fn starts_lifetime_run_of_a_quote_followed_by_a_closed_run_is_false() {
+        // The run after the quote is immediately closed by a quote: it
+        // is the interior of a character literal, not a lifetime.
+        let line = Line::from("'a'");
+        assert!(!line.starts_lifetime_run(0));
+        let line = Line::from("'test'");
+        assert!(!line.starts_lifetime_run(0));
+    }
+
+    #[test]
+    fn starts_lifetime_run_of_a_quote_without_a_run_is_false() {
+        let line = Line::from("'");
+        assert!(!line.starts_lifetime_run(0));
+        let line = Line::from("' ");
+        assert!(!line.starts_lifetime_run(0));
+        let line = Line::from("'.");
+        assert!(!line.starts_lifetime_run(0));
+        // é is not an ASCII run character.
+        let line = Line::from("'\u{e9}");
+        assert!(!line.starts_lifetime_run(0));
+    }
+
+    #[test]
+    fn char_literal_end_skips_a_quote_that_opens_a_lifetime_run() {
+        // The quote of 'static opens a lifetime run, so it is no
+        // closer: the literal that opened before it keeps scanning and
+        // finds no closer.
+        let line = Line::from("'x 'static");
+        assert_eq!(line.char_literal_end(0), None);
+        // A plain quote still closes: a space after the quote is no run.
+        let line = Line::from("'x' 'a");
+        assert_eq!(line.char_literal_end(0), Some(3));
+        // The run after the closer is immediately closed by a quote, so
+        // the closer is a plain quote, not a lifetime.
+        let line = Line::from("'x' 'test'");
+        assert_eq!(line.char_literal_end(0), Some(3));
     }
 
     #[test]

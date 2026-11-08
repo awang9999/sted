@@ -968,14 +968,16 @@ mod tests {
             // The whole thing is one character literal: the interior
             // `static` is never read as a lifetime.
             &[(0..8, Style::Char)],
-            // `f<'a>`: the `<'a>` is one character literal under the
-            // naive pairing, so no lifetime span lands inside it; the
-            // `&'static` is a lifetime, added after the word spans.
+            // Every quote opens a lifetime run (the run after each
+            // quote is not immediately closed by a quote), so no
+            // character literal forms: each quote is a lifetime
+            // specifier, added after the word spans.
             &[
                 (0..2, Style::Keyword),
-                (17..26, Style::Char),
                 (28..31, Style::Type),
                 (45..48, Style::Type),
+                (17..19, Style::Lifetime),
+                (25..27, Style::Lifetime),
                 (37..44, Style::Lifetime),
             ],
             &[
@@ -983,25 +985,27 @@ mod tests {
                 (16..19, Style::Type),
                 (8..15, Style::Lifetime),
             ],
-            // `f<'a>` is one character literal under the naive
-            // pairing: the apostrophe of `f<'a>` pairs with the quote
-            // of the first `&'a`, so the literal runs over both; the
-            // second `&'a` is a lifetime, added after the word spans.
+            // Every quote opens a lifetime run, so no character
+            // literal forms: each quote is a lifetime specifier, added
+            // after the word spans.
             &[
                 (0..2, Style::Keyword),
-                (5..14, Style::Char),
                 (16..19, Style::Type),
                 (28..31, Style::Type),
+                (5..7, Style::Lifetime),
+                (13..15, Style::Lifetime),
                 (25..27, Style::Lifetime),
             ],
-            // `g<'a, 'b>`: the first quote pairs with the second, so the
-            // literal runs over both names; the third quote pairs with
-            // the quote of the first `&'a`, and the rest is plain text.
+            // Same for two generics: every quote opens a lifetime run,
+            // so no character literal forms.
             &[
                 (0..2, Style::Keyword),
-                (5..10, Style::Char),
-                (17..30, Style::Char),
+                (20..23, Style::Type),
                 (32..35, Style::Type),
+                (5..7, Style::Lifetime),
+                (9..11, Style::Lifetime),
+                (17..19, Style::Lifetime),
+                (29..31, Style::Lifetime),
             ],
             // The apostrophe of `it's` opens no literal, so the run
             // after it is a lifetime: the quote plus the single letter
@@ -1309,11 +1313,74 @@ mod tests {
         let highlighter = RustSyntaxHighlighter;
         let line = Line::from("it's a 'test'");
         // Documented naive-pairing behavior: the apostrophe of `it's`
-        // opens the literal and the opening quote of `'test'` closes it,
-        // so the span runs from the apostrophe to that quote.
+        // opens the literal. The opening quote of `'test'` is no
+        // lifetime run (its run `test` is immediately closed by a
+        // quote), so it closes the literal; the span runs from the
+        // apostrophe to that quote.
         assert_eq!(
             highlighter.base_style(&line).spans(),
             &[(2..8, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_does_not_pair_a_quote_with_a_lifetime_quote() {
+        let highlighter = RustSyntaxHighlighter;
+        // Every quote in this line opens a lifetime run: the run after
+        // each quote is not immediately closed by a quote, so no quote
+        // is taken as a character-literal closer. No character span
+        // forms; each quote keeps its lifetime style.
+        let line = Line::from("fn lifetime_demo<'a>(s: &'a str) -> &'static str {");
+        let style = highlighter.base_style(&line);
+        let has_char = style.spans().iter().any(|(_, s)| *s == Style::Char);
+        assert!(!has_char, "no char span should form");
+        // The three lifetime specifiers, in line order.
+        assert_eq!(
+            style.spans(),
+            &[
+                (0..2, Style::Keyword),
+                (28..31, Style::Type),
+                (45..48, Style::Type),
+                (17..19, Style::Lifetime),
+                (25..27, Style::Lifetime),
+                (37..44, Style::Lifetime),
+            ]
+        );
+        assert_eq!(style.at(17), Style::Lifetime, "the ' of the first 'a");
+        assert_eq!(style.at(25), Style::Lifetime, "the ' of the second 'a");
+        assert_eq!(style.at(37), Style::Lifetime, "the ' of 'static");
+        // The stretch between the generics and the return type is not
+        // swallowed as a character literal: the `>` and the `&` stay
+        // plain.
+        assert_eq!(style.at(19), Style::None, "the > after 'a");
+        assert_eq!(style.at(36), Style::None, "the & before 'static");
+    }
+
+    #[test]
+    fn the_rust_highlighter_keeps_a_char_literal_whose_closer_is_a_plain_quote() {
+        let highlighter = RustSyntaxHighlighter;
+        // The closer of 'a' is a plain quote (a space after it, not a
+        // lifetime run), so the literal is intact; the following quote
+        // starts a lifetime.
+        let line = Line::from("'a' 'b");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..3, Style::Char), (4..6, Style::Lifetime)]
+        );
+        // 'static' is one character literal: the interior `static` is
+        // immediately closed by a quote, so its opening quote is no
+        // lifetime run, and the whole thing is a Char span.
+        let line = Line::from("'static'");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..8, Style::Char)]
+        );
+        // A quoted quote: the backslash skips the escaped quote, and
+        // the last quote is a plain closer.
+        let line = Line::from("'\\'' ");
+        assert_eq!(
+            highlighter.base_style(&line).spans(),
+            &[(0..4, Style::Char)]
         );
     }
 
