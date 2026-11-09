@@ -10,8 +10,11 @@ use std::sync::Arc;
 /// sits on — in its own, stronger highlight, numbers in the digit
 /// color, keywords in the keyword color, common type names in the type
 /// color, literals and enum-variant names in the literal color, and
-/// character literals in the character color. Lifetime specifiers are
-/// drawn in the lifetime color. Comments are drawn in the comment
+/// character literals in the character color. String literals are drawn
+/// in the string color: a double-quoted region — the opening quote, the
+/// interior, and the closing quote, an escaped `\"` inside it included
+/// — a span in each of the lines a string spans. Lifetime specifiers
+/// are drawn in the lifetime color. Comments are drawn in the comment
 /// color: a single-line comment — a `//` marker and everything to the
 /// end of the line, marker included — and a multi-line comment — a
 /// `/* ... */` region, a span in each of the lines it covers, nested
@@ -44,6 +47,11 @@ pub enum Style {
     /// A character literal: the opening quote, its interior, and the
     /// closing quote: drawn in the character color.
     Char,
+    /// A string literal: the opening double quote, its interior, and
+    /// the closing double quote — an escaped `\"` inside it included,
+    /// and a string that spans lines, a span in each of the lines it
+    /// covers: drawn in the string color.
+    String,
     /// A lifetime specifier: the quote that opens a lifetime name and
     /// the name itself — `'static`, `'_`, `'a_b2` —: drawn in the
     /// lifetime color.
@@ -104,6 +112,28 @@ impl LineStyle {
     }
 }
 
+/// The state the lines above a line leave open for it: the multi-line
+/// comment depth — the number of unclosed `/*` markers — and whether a
+/// string left open by an earlier line is still open. A line styled
+/// with a non-zero depth or an open string starts inside the construct
+/// the earlier lines left open: the comment, from column zero to the
+/// `*/` that closes it, or the string, from column zero to the `"` that
+/// closes it.
+///
+/// The default — zero depth, no open string — is the state of the top
+/// of a file, and of every line of a file whose highlighter carries no
+/// state at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CarriedState {
+    /// The number of unclosed `/*` markers the lines above left open:
+    /// the depth of the multi-line comment carried over from an
+    /// earlier line, when there is one.
+    pub ml_depth: usize,
+    /// Whether the lines above left a string open: a double quote with
+    /// no unescaped closing double quote on any line so far.
+    pub in_string: bool,
+}
+
 /// A syntax highlighter for one language: the rules that decide how a
 /// line's text is styled at the base level, before the buffer's other
 /// styles (search matches, the active match) are layered on top.
@@ -114,39 +144,51 @@ impl LineStyle {
 /// about it. Each language ships one highlighter, held behind an
 /// [`Arc`] so a `Styles` — and with it a buffer — stays `Clone`.
 ///
-/// A language whose comments can span lines — Rust, say — styles a line
-/// with the depth of the comment carried over from the lines above it:
-/// the number of unclosed `/*` markers. [`base_style_with_depth`](
-/// SyntaxHighlighter::base_style_with_depth) takes that depth and
-/// returns the depth the line leaves open for the next line. The
-/// defaults keep the depth at zero: a language without such comments —
-/// plain text — never carries any, so it implements only
-/// [`base_style`](SyntaxHighlighter::base_style); a language with them
-/// implements `base_style_with_depth`, and `base_style` then styles a
-/// line as if the depth were zero.
+/// A language whose constructs can span lines — Rust, say, with its
+/// multi-line comments and its strings — styles a line with the state
+/// the lines above it left open: the number of unclosed `/*` markers
+/// and whether a string is still open. [`base_style_with_carry`](
+/// SyntaxHighlighter::base_style_with_carry) takes that state and
+/// returns the state the line leaves open for the next line. The
+/// defaults keep the state at its default — zero depth, no open
+/// string: a language without such constructs — plain text — never
+/// carries any, so it implements only [`base_style`](
+/// SyntaxHighlighter::base_style); a language with them implements
+/// `base_style_with_carry`, and `base_style` then styles a line as if
+/// the state were the default.
+///
+/// The restyle of a suffix after an edit rests on one contract: for a
+/// given `line` and given carry, `base_style_with_carry` is a pure,
+/// deterministic function — the same inputs style the same way — so a
+/// line that starts at the state it was stored with, and whose text is
+/// unchanged, styles identically.
 pub trait SyntaxHighlighter: Send + Sync {
     /// The type of file this highlighter styles: the file type it is
     /// registered as the highlighter of.
     fn file_type(&self) -> FileType;
 
     /// The base styling of `line`'s text under this language's rules,
-    /// with no multi-line comment carried over from an earlier line.
+    /// with no construct carried over from an earlier line.
     fn base_style(&self, line: &Line) -> LineStyle {
-        self.base_style_with_depth(line, 0).0
+        self.base_style_with_carry(line, CarriedState::default()).0
     }
 
     /// The base styling of `line`'s text under this language's rules,
-    /// given `depth_in`, the number of unclosed `/*` markers the lines
-    /// above left open: a line styled with a non-zero depth sits inside
-    /// the comment carried over from an earlier line. Returns the
-    /// styling and `depth_out`, the number of unclosed markers the line
-    /// leaves open for the next line.
+    /// given `carry_in`, the state the lines above left open: a line
+    /// styled with a non-zero depth or an open string sits inside the
+    /// construct carried over from an earlier line. Returns the
+    /// styling and `carry_out`, the state the line leaves open for the
+    /// next line.
     ///
-    /// The default keeps the depth at zero — in and out: a language
-    /// without multi-line comments never carries any.
-    fn base_style_with_depth(&self, line: &Line, depth_in: usize) -> (LineStyle, usize) {
-        let _ = depth_in;
-        (self.base_style(line), 0)
+    /// The default keeps the state at its default — in and out: a
+    /// language without multi-line constructs never carries any.
+    fn base_style_with_carry(
+        &self,
+        line: &Line,
+        carry_in: CarriedState,
+    ) -> (LineStyle, CarriedState) {
+        let _ = carry_in;
+        (self.base_style(line), CarriedState::default())
     }
 }
 
@@ -223,14 +265,39 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// starts inside a comment: no word, character-literal, or lifetime
 /// span may start at or after the marker — the comment swallows the
 /// rest of the line the way a character literal swallows its
-/// interior. A `//` inside a double-quoted string still starts a
-/// comment: strings are otherwise unstyled by the highlighter, so
-/// their slashes are plain graphemes. The comment span is added after
-/// every other span, so it wins the overlap of the digit spans of any
-/// numbers the comment mentions. A `//` inside a multi-line comment
-/// region is no marker: the region owns those graphemes, so the code
-/// after the closing `*/` is styled as usual, not swallowed by a
-/// single-line comment to the end of the line.
+/// interior. A `//` inside a double-quoted string starts no comment:
+/// the string swallows it the way a character literal swallows a `//`
+/// in its interior. The comment span is added after every other span,
+/// so it wins the overlap of the digit spans of any numbers the
+/// comment mentions. A `//` inside a multi-line comment region is no
+/// marker: the region owns those graphemes, so the code after the
+/// closing `*/` is styled as usual, not swallowed by a single-line
+/// comment to the end of the line.
+///
+/// String literals are styled too: everything from an opening double
+/// quote to its closing double quote — the opening quote, the
+/// interior, and the closing quote — carries [`Style::String`],
+/// whatever the interior is. A backslash escapes the grapheme it
+/// precedes, so an escaped `\"` is not the closing quote, and a
+/// backslash at the end of a line escapes the line break itself, which
+/// no line's graphemes carry: the string simply continues on the next
+/// line, with the next line's first grapheme unescaped. Strings may
+/// span lines the way multi-line comments do: a line that ends with a
+/// string open leaves it open — the state is carried to the next line,
+/// which sits inside the string from column zero until the closing
+/// quote — and a string left open at the end of a file stays open.
+/// There are no nested strings: the first unescaped closing quote
+/// closes the string, whatever the interior is. No other base
+/// highlighting starts inside a string: no word, number, character-
+/// literal, lifetime, or comment span starts in its interior — a `//`
+/// there starts no comment, a `/*` or a `*/` counts no depth, and a
+/// quote opens no character literal and no lifetime run — the interior
+/// is swallowed the way a character literal's interior is. A double
+/// quote inside a multi-line comment region, on the other hand, opens
+/// no string: the region swallows it the way it swallows every other
+/// grapheme. The string spans are added after the digit and word spans,
+/// so they win the overlap of any digit span a string's interior
+/// carries.
 ///
 /// Multi-line comments are styled too: a `/*` and the matching `*/`
 /// that closes it — the region between, markers included — carries
@@ -241,17 +308,21 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// `/* ... */` inside a comment is part of it, not a comment of its
 /// own. The counting is naive: a `/*` or a `*/` in the interior of a
 /// character literal counts too, whatever the literal pairing does —
-/// the markers are counted on the raw graphemes of the line. A line
-/// that ends with the depth above zero leaves the comment open: the
+/// the markers are counted on the raw graphemes of the line. The
+/// interior of a string, on the other hand, counts no markers at all:
+/// a `/*` or a `*/` there is part of the string's interior, not a
+/// comment marker, so a string that spans lines may carry a comment's
+/// markers in its interior without opening or closing the comment. A
+/// line that ends with the depth above zero leaves the comment open: the
 /// depth is carried to the next line, which sits inside the comment
 /// from column zero until the `*/` that closes it, and a `/*` in a
 /// line with the depth above zero adds one without opening a new
 /// region. A `*/` with the depth at zero is a stray marker — a
 /// multiplication and a division, say — and changes nothing. No other
 /// base highlighting starts inside a comment region: no word,
-/// character-literal, or lifetime span starts at or after an open
-/// `/*` and before its closing `*/` — the region swallows them the
-/// way a single-line comment swallows the rest of the line. A line
+/// character-literal, string, or lifetime span starts at or after an
+/// open `/*` and before its closing `*/` — the region swallows them
+/// the way a single-line comment swallows the rest of the line. A line
 /// that starts with the depth above zero is comment from column zero
 /// to its closing `*/`, and the regular highlighting resumes after the
 /// marker on the same line. An empty line inside a comment carries no
@@ -300,15 +371,20 @@ const LITERALS: &[&str] = &["Some", "None", "Ok", "Err", "true", "false"];
 /// for the base styling: the character-literal spans found so far, the
 /// multi-line comment depth, the position of the `/*` that opened the
 /// current unclosed comment region, the closed comment regions found so
-/// far, and the `//` marker position.
+/// far, the position of the `"` that opened the current unclosed
+/// string, the closed string regions found so far, and the `//` marker
+/// position.
 ///
-/// The invariant the methods keep: `depth` is the number of unclosed
+/// The invariants the methods keep: `depth` is the number of unclosed
 /// `/*` markers — the depth carried in from the earlier lines plus one
 /// per `/*` the scan saw minus one per `*/` it saw — and `ml_open` is
 /// `Some` exactly when `depth` is non-zero, holding the position of the
-/// `/*` that opened the region the depth counts. A line styled with a
-/// non-zero depth starts inside the comment carried over from an
-/// earlier line: its region starts at column zero.
+/// `/*` that opened the region the depth counts. And `string_open` is
+/// `Some` exactly when a string is open — one the scan opened on this
+/// line, or one carried over from an earlier line, which starts at
+/// column zero. A line styled with a non-zero depth or an open string
+/// starts inside the construct carried over from an earlier line: its
+/// region starts at column zero.
 struct ScanState {
     /// The character-literal spans the scan found, in line order: their
     /// interiors are never visited for words or a `//` marker, but their
@@ -324,6 +400,14 @@ struct ScanState {
     /// `/*` that opened it and the `*/` that closed it, markers
     /// included.
     ml_regions: Vec<Range<usize>>,
+    /// The position of the `"` that opened the current unclosed string:
+    /// `Some` exactly when a string is open — one the scan opened on
+    /// this line, or one carried over from an earlier line, which starts
+    /// at column zero.
+    string_open: Option<usize>,
+    /// The string regions found so far, in line order: each the `"` that
+    /// opened it and the `"` that closed it, delimiters included.
+    string_regions: Vec<Range<usize>>,
     /// The position of the `//` marker, when the scan found one in a
     /// plain grapheme outside a comment region: from the marker to the
     /// end of the line is the single-line comment, and the scan ends
@@ -336,12 +420,14 @@ impl ScanState {
     /// from the earlier lines: a line with a non-zero depth sits inside
     /// the comment carried over from an earlier line, which starts at
     /// column zero.
-    fn new(depth_in: usize) -> Self {
+    fn new(depth_in: usize, string_in: bool) -> Self {
         Self {
             char_spans: Vec::new(),
             depth: depth_in,
             ml_open: if depth_in == 0 { None } else { Some(0) },
             ml_regions: Vec::new(),
+            string_open: if string_in { Some(0) } else { None },
+            string_regions: Vec::new(),
             comment_start: None,
         }
     }
@@ -406,6 +492,22 @@ impl ScanState {
         self.in_ml_comment(position)
             || self.ml_regions.iter().any(|region| region.contains(&position))
     }
+
+    /// Whether the grapheme at `position` sits inside the string the
+    /// scan has open: one carried over from an earlier line (which
+    /// starts at column zero), or one the scan opened on this line.
+    fn in_string(&self, position: usize) -> bool {
+        self.string_open.is_some_and(|open| position >= open)
+    }
+
+    /// Whether the grapheme at `position` sits inside any string region
+    /// of the line: the open one, or a closed one.
+    fn in_string_region(&self, position: usize) -> bool {
+        self.in_string(position)
+            || self.string_regions
+                .iter()
+                .any(|region| region.contains(&position))
+    }
 }
 
 /// The position the scan resumes from after walking the graphemes from
@@ -414,12 +516,25 @@ impl ScanState {
 /// - inside the open comment region, only the markers matter: a `/*`
 ///   adds one to the depth, a `*/` removes one and closes the region
 ///   when the depth reaches zero, and a `//` there is no marker and a
-///   quote opens no character literal — the region swallows them;
+///   quote opens no character literal and a double quote opens no
+///   string — the region swallows them;
+/// - inside a string — one carried over from an earlier line, which the
+///   walk meets from column zero — everything up to the closing quote
+///   is interior: no word starts, a `//` starts no comment, a `/*` or a
+///   `*/` counts no depth, and a quote opens nothing; a string with no
+///   closer on the line runs to the end of the line and stays open;
 /// - a quote that opens a character literal claims everything up to the
 ///   literal's end — the grapheme just past its closing quote — and the
 ///   walk resumes there; the literal's interior is scanned for `/*` and
 ///   `*/` markers — the naive counting — but not for words or a `//`
 ///   marker;
+/// - a double quote in a plain grapheme opens a string: the walk claims
+///   everything up to the string's end — the grapheme just past the
+///   closing quote — and resumes there; an escaped `\"` is no closer,
+///   and a string with no closer on the line runs to the end of the
+///   line and is left open for the next one. The interior is scanned
+///   for nothing: no word starts, a `//` starts no comment, and a `/*`
+///   or a `*/` counts no depth;
 /// - a `//` marker in a plain grapheme outside a comment region is
 ///   recorded in the state, and the walk ends there: from the marker to
 ///   the end of the line is the single-line comment, so no `/*` after
@@ -446,6 +561,25 @@ fn advance(
             } else {
                 position = position.saturating_add(1);
             }
+        } else if state.in_string(position) {
+            // The walk meets the string carried over from an earlier
+            // line from column zero: its interior runs from here to the
+            // closing quote, or to the end of the line when the line
+            // carries no closer — and nothing in it starts a span of
+            // its own, so no word, quote, or comment marker is visited.
+            let open = state
+                .string_open
+                .expect("an in-string position has an open string");
+            match line.string_end_from(position) {
+                Some(close) => {
+                    state.string_regions.push(open..close);
+                    state.string_open = None;
+                    position = close;
+                }
+                None => {
+                    position = line.grapheme_count();
+                }
+            }
         } else if let Some(end) = line.char_literal_end(position) {
             style.add(position..end, Style::Char);
             state.char_spans.push(position..end);
@@ -457,6 +591,17 @@ fn advance(
         } else if line.starts_ml_comment(position) {
             state.see_ml_open(position);
             position = position.saturating_add(2);
+        } else if line.is_double_quote(position) {
+            // A double quote in a plain grapheme opens a string: to
+            // the closing quote — an escaped \" no closer — or to the
+            // end of the line, left open for the next one.
+            if let Some(close) = line.string_end_from(position.saturating_add(1)) {
+                state.string_regions.push(position..close);
+                position = close;
+            } else {
+                state.string_open = Some(position);
+                position = line.grapheme_count();
+            }
         } else {
             // A stray */ with no region open, or an ordinary grapheme:
             // one step past it.
@@ -489,40 +634,53 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
     /// of its words that is a keyword, a common type name, or a literal
     /// or enum-variant name, the character style over each character
     /// literal — the opening quote, its interior, and its closing
-    /// quote — the lifetime style over each lifetime specifier — a
-    /// quote that opens no character literal, followed by a run of
-    /// identifier characters — and the comment style over the line's
-    /// comments: each multi-line comment region — the `/*` that opens
-    /// it and the `*/` that closes it, markers included, a region that
-    /// was still open at the end of the line running to the end of the
-    /// line — the single-line comment — the first `//` marker whose
-    /// first slash sits in a plain grapheme, and everything to the end
-    /// of the line, marker included — and, when `depth_in` is
-    /// non-zero, the comment carried over from the earlier lines, which
-    /// runs from column zero to the `*/` that closes it.
+    /// quote — the string style over each string literal — the opening
+    /// double quote, its interior, and the closing double quote, an
+    /// escaped `\"` inside it included — the lifetime style over each
+    /// lifetime specifier — a quote that opens no character literal,
+    /// followed by a run of identifier characters — and the comment
+    /// style over the line's comments: each multi-line comment region —
+    /// the `/*` that opens it and the `*/` that closes it, markers
+    /// included, a region that was still open at the end of the line
+    /// running to the end of the line — the single-line comment — the
+    /// first `//` marker whose first slash sits in a plain grapheme,
+    /// and everything to the end of the line, marker included — and,
+    /// when `carry_in` carries a non-zero depth or an open string, the
+    /// comment or the string carried over from the earlier lines, which
+    /// runs from column zero to the `*/` that closes it or the `"` that
+    /// closes it.
     ///
     /// The spans land in phases, and a later span wins an overlap:
     /// first the digit spans, then the word and character-literal
     /// spans — so a type like `u128` or `i8` renders fully in the type
     /// color, over the digit spans of its inner digits — then the
-    /// lifetime spans, and finally the comment spans, which win the
-    /// overlap of any digit span a comment sits over. The words and the
-    /// character literals are found in one scan, in line order: a word
-    /// run that is in one of the lists carries that list's style, and a
-    /// quote that opens a character literal hands the scan to the
-    /// literal parser, whose end — the grapheme just past the closing
-    /// quote — is where the scan resumes. The interior words of a
-    /// literal are never visited, so no word or keyword span is ever
-    /// added inside one, and a literal's span wins the overlap of any
-    /// digit spans inside it. The same scan tracks the comments: a
-    /// `/*` in the plain graphemes adds one to the depth carried in
+    /// lifetime spans, then the string spans, and finally the comment
+    /// spans, which win the overlap of any digit span a comment sits
+    /// over. The words, the character literals, and the strings are
+    /// found in one scan, in line order: a word run that is in one of
+    /// the lists carries that list's style, a quote that opens a
+    /// character literal hands the scan to the literal parser, and a
+    /// double quote that opens a string hands it to the string parser,
+    /// whose end — the grapheme just past the closing quote — is where
+    /// the scan resumes. The interior words of a literal or a string
+    /// are never visited, so no word or keyword span is ever added
+    /// inside one, and a literal's or a string's span wins the overlap
+    /// of any digit spans inside it. The same scan tracks the comments:
+    /// a `/*` in the plain graphemes adds one to the depth carried in
     /// from the earlier lines, a `*/` removes one, and the region
-    /// closes at the `*/` that brings the depth to zero; a word inside
-    /// a comment region is swallowed — the region starts no word,
-    /// character-literal, or lifetime span — and the first `//` marker
-    /// outside a comment region ends the scan, so no `/*` after it
-    /// counts toward the depth.
-    fn base_style_with_depth(&self, line: &Line, depth_in: usize) -> (LineStyle, usize) {
+    /// closes at the `*/` that brings the depth to zero — a `/*` or a
+    /// `*/` in the interior of a string counts none; a word inside a
+    /// comment region is swallowed — the region starts no word,
+    /// character-literal, string, or lifetime span — and the first
+    /// `//` marker outside a comment region ends the scan, so no `/*`
+    /// after it counts toward the depth. The returned carry is the
+    /// depth the line leaves open and whether a string is still open at
+    /// the end of the line.
+    fn base_style_with_carry(
+        &self,
+        line: &Line,
+        carry_in: CarriedState,
+    ) -> (LineStyle, CarriedState) {
         let mut style = LineStyle::new();
         for span in line.number_spans() {
             style.add(span, Style::Digit);
@@ -531,7 +689,7 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         // number spans on purpose: a later span wins an overlap, so a
         // type like `u128` or `i8` renders fully in the type color,
         // over the digit spans of its inner digits.
-        let mut state = ScanState::new(depth_in);
+        let mut state = ScanState::new(carry_in.ml_depth, carry_in.in_string);
         let words = line.word_spans();
         let mut position = 0;
         for span in &words {
@@ -543,14 +701,26 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
                 break;
             }
             if position > span.start {
-                // The word is inside a character literal: its opening
-                // quote claimed it, so it carries no style of its own.
+                // The word is inside a character literal or a string:
+                // the construct that opened before it claimed it, so
+                // it carries no style of its own.
                 continue;
             }
             if state.in_ml_region(span.start) {
                 // The word is inside a multi-line comment region: the
                 // region swallows it, the way a single-line comment
                 // swallows the rest of the line.
+                position = span.end;
+                continue;
+            }
+            if state.in_string(span.start) {
+                // The word is inside the string carried over from an
+                // earlier line: the string swallows it, the way a
+                // comment region swallows a word. (A string that opens
+                // on this line is already claimed by the gap walk, so
+                // this branch only sees the carried-over case — a
+                // closing quote is no word character, so a word that
+                // starts inside a string sits inside it whole.)
                 position = span.end;
                 continue;
             }
@@ -561,10 +731,20 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
             position = span.end;
         }
         // A quote may open a literal in the plain tail after the last
-        // word too — and so may a comment: the tail walk looks for
-        // both.
+        // word too — and so may a string or a comment: the tail walk
+        // looks for all of them.
         if state.comment_start.is_none() {
             advance(position, line.grapheme_count(), line, &mut style, &mut state);
+        }
+        // A comment or a string that was still open at the end of the
+        // line runs to the end of the line: close the region there, so
+        // the lifetime filter sees it, leaving the depth and the string
+        // flag to carry over to the next line.
+        if let Some(open) = state.ml_open.take() {
+            state.ml_regions.push(open..line.grapheme_count());
+        }
+        if let Some(open) = state.string_open {
+            state.string_regions.push(open..line.grapheme_count());
         }
         // The lifetime spans are added after all the character spans,
         // and in line order, on purpose: a quote the character scan
@@ -577,30 +757,39 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         // dropped too — in the single-line comment, which owns the
         // rest of the line and opens with a slash — no run character —
         // or in a multi-line comment region, which swallows it: no
-        // lifetime run starts inside a comment. Where a lifetime span
-        // does overlap another span, the later span wins the overlap,
-        // as it does for the word styles.
+        // lifetime run starts inside a comment. And a lifetime whose
+        // quote sits in a string is dropped too: the string swallows
+        // the quote the way it swallows every other grapheme of its
+        // interior, so no lifetime run starts inside a string either.
+        // Where a lifetime span does overlap another span, the later
+        // span wins the overlap, as it does for the word styles.
         for span in line.lifetime_spans() {
             let in_comment =
                 state.comment_start.is_some_and(|start| span.start >= start)
                     || state.in_ml_region(span.start);
-            if !in_comment && !state.char_spans.iter().any(|c| c.contains(&span.start)) {
+            let in_string = state.in_string_region(span.start);
+            if !in_comment
+                && !in_string
+                && !state.char_spans.iter().any(|c| c.contains(&span.start))
+            {
                 style.add(span, Style::Lifetime);
             }
         }
-        // A comment that was still open at the end of the line runs to
-        // the end of the line: close the region there, leaving the
-        // depth to carry over to the next line.
-        if let Some(open) = state.ml_open.take() {
-            state.ml_regions.push(open..line.grapheme_count());
+        // The string spans are added after the digit and word spans,
+        // on purpose: a later span wins an overlap, so the string color
+        // wins the digit spans of any numbers the string mentions — and
+        // a string that was still open at the end of the line runs to
+        // the end of the line, the way an open comment does.
+        for region in &state.string_regions {
+            style.add(region.clone(), Style::String);
         }
         // The comment spans are added last, after the digit, word,
-        // character, and lifetime spans, on purpose: a later span wins
-        // an overlap, so the comment color wins every grapheme of a
-        // comment — from its opening marker, or from column zero when
-        // the line sits inside the comment carried over from an
-        // earlier line, to its closing marker, or to the end of the
-        // line when it was not closed on this line — over the digit
+        // character, string, and lifetime spans, on purpose: a later
+        // span wins an overlap, so the comment color wins every grapheme
+        // of a comment — from its opening marker, or from column zero
+        // when the line sits inside the comment carried over from an
+        // earlier line, to its closing marker, or to the end of the line
+        // when it was not closed on this line — over the digit
         // spans of any numbers the comment mentions.
         for region in &state.ml_regions {
             style.add(region.clone(), Style::Comment);
@@ -608,7 +797,13 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         if let Some(start) = state.comment_start {
             style.add(start..line.grapheme_count(), Style::Comment);
         }
-        (style, state.depth)
+        (
+            style,
+            CarriedState {
+                ml_depth: state.depth,
+                in_string: state.string_open.is_some(),
+            },
+        )
     }
 }
 
@@ -636,19 +831,21 @@ fn highlighter_for(file_type: FileType) -> Arc<dyn SyntaxHighlighter> {
 /// now, digits and words are styled only in Rust files, while plain
 /// text carries no base styling at all.
 ///
-/// A highlighter whose rules carry a comment depth across lines — the
-/// Rust one, with its multi-line comments — needs, to re-style a line,
-/// the depth that line starts at: the depth the lines above it left
-/// open. `depth_after` stores that depth after every line, and `texts`
-/// mirrors the lines' text, so a re-style of a line and the lines below
-/// it never has to ask the buffer for anything. The invariant the edit
-/// methods keep: for every `i`, `lines[i]` is the highlighter's
-/// styling of `texts[i]` given the depth after the line above it (zero
-/// for the first line), and `depth_after[i]` is the depth that styling
-/// leaves open. An edit re-styles the edited line and the lines below
-/// it until the depth reconverges with the stored value: a line that
-/// starts at the depth it stored, with its text unchanged, styles
-/// identically, and so does every line below it, so the re-style stops
+/// A highlighter whose rules carry state across lines — the Rust one,
+/// with its multi-line comments and its strings — needs, to re-style a
+/// line, the state that line starts at: the state the lines above it
+/// left open. `carry_after` stores that state after every line, and
+/// `texts` mirrors the lines' text, so a re-style of a line and the
+/// lines below it never has to ask the buffer for anything. The
+/// invariant the edit methods keep: for every `i`, `lines[i]` is the
+/// highlighter's styling of `texts[i]` given the state after the line
+/// above it (the default for the first line), and `carry_after[i]` is
+/// the state that styling leaves open. An edit re-styles the edited
+/// line and the lines below it until the state reconverges with the
+/// stored value: a line that starts at the state it stored, with its
+/// text unchanged, styles identically — the highlighter's
+/// `base_style_with_carry` is a pure function of the line and the
+/// carry — and so does every line below it, so the re-style stops
 /// there.
 #[derive(Clone)]
 pub struct Styles {
@@ -657,11 +854,11 @@ pub struct Styles {
     /// has to ask the buffer for the lines' text.
     texts: Vec<Line>,
     lines: Vec<LineStyle>,
-    /// The multi-line comment depth after each line: the number of
-    /// unclosed `/*` markers the lines up to and including it left
-    /// open. Parallel to `lines`; zero for every line of a file whose
-    /// highlighter carries no depth.
-    depth_after: Vec<usize>,
+    /// The state after each line: the multi-line comment depth and the
+    /// string-open flag the lines up to and including it leave open.
+    /// Parallel to `lines`; the default — zero depth, no open string —
+    /// for every line of a file whose highlighter carries no state.
+    carry_after: Vec<CarriedState>,
     /// The highlighter whose rules the base styling of the lines is
     /// built under: the one of the buffer's file type. Held behind an
     /// [`Arc`] so a `Styles` — and with it a buffer — stays `Clone`.
@@ -669,23 +866,23 @@ pub struct Styles {
 }
 
 /// The base styling of `lines` under `highlighter`'s rules, styled top
-/// to bottom: each line is styled with the depth the lines above it
-/// left open. Returns the per-line styling and the depth after each
+/// to bottom: each line is styled with the state the lines above it
+/// left open. Returns the per-line styling and the state after each
 /// line.
 fn styled_by(
     highlighter: &Arc<dyn SyntaxHighlighter>,
     lines: &[Line],
-) -> (Vec<LineStyle>, Vec<usize>) {
+) -> (Vec<LineStyle>, Vec<CarriedState>) {
     let mut styles: Vec<LineStyle> = Vec::with_capacity(lines.len());
-    let mut depth_after: Vec<usize> = Vec::with_capacity(lines.len());
-    let mut depth = 0;
+    let mut carry_after: Vec<CarriedState> = Vec::with_capacity(lines.len());
+    let mut carry = CarriedState::default();
     for line in lines {
-        let (style, out) = highlighter.base_style_with_depth(line, depth);
+        let (style, out) = highlighter.base_style_with_carry(line, carry);
         styles.push(style);
-        depth_after.push(out);
-        depth = out;
+        carry_after.push(out);
+        carry = out;
     }
-    (styles, depth_after)
+    (styles, carry_after)
 }
 
 impl Default for Styles {
@@ -697,14 +894,14 @@ impl Default for Styles {
 }
 
 impl fmt::Debug for Styles {
-    /// The lines' text, their styling, the depth after each line, and
+    /// The lines' text, their styling, the state after each line, and
     /// the type of the highlighter in use — the highlighter itself is a
     /// black box to the formatter.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Styles")
             .field("texts", &self.texts)
             .field("lines", &self.lines)
-            .field("depth_after", &self.depth_after)
+            .field("carry_after", &self.carry_after)
             .field("file_type", &self.highlighter.file_type())
             .finish()
     }
@@ -714,15 +911,15 @@ impl Styles {
     /// The styling for a slice of the lines of a `file_type` file: the
     /// base styling of each line under the file type's highlighter's
     /// rules, with no other styles, styled top to bottom: each line is
-    /// styled with the depth the lines above it left open.
+    /// styled with the state the lines above it left open.
     pub fn for_lines(file_type: FileType, lines: &[Line]) -> Self {
         let highlighter = highlighter_for(file_type);
         let texts = lines.to_vec();
-        let (lines, depth_after) = styled_by(&highlighter, &texts);
+        let (lines, carry_after) = styled_by(&highlighter, &texts);
         Self {
             texts,
             lines,
-            depth_after,
+            carry_after,
             highlighter,
         }
     }
@@ -735,57 +932,57 @@ impl Styles {
 
     /// Inserts a line's base styling at `row`, shifting the following
     /// lines' styling down: the mirror of a line being inserted into the
-    /// buffer. The new line is styled with the depth the line above it
-    /// left open, and the lines below it are re-styled until the depth
+    /// buffer. The new line is styled with the state the line above it
+    /// left open, and the lines below it are re-styled until the state
     /// reconverges with the stored value.
     pub fn insert_line(&mut self, row: usize, line: &Line) {
         let row = row.min(self.texts.len());
         // The lines above `row` are untouched by the insertion: the new
-        // line starts at the depth the line above it left open, and so
+        // line starts at the state the line above it left open, and so
         // did the line that was at `row` before the insertion.
-        let depth_in = self.depth_before(row);
+        let carry_in = self.carry_before(row);
         self.texts.insert(row, line.clone());
-        let (style, depth) = self.highlighter.base_style_with_depth(line, depth_in);
+        let (style, carry) = self.highlighter.base_style_with_carry(line, carry_in);
         self.lines.insert(row, style);
-        self.depth_after.insert(row, depth);
-        self.restyle_suffix(row.saturating_add(1), depth, depth_in);
+        self.carry_after.insert(row, carry);
+        self.restyle_suffix(row.saturating_add(1), carry, carry_in);
     }
 
     /// Removes the styling of the line at `row`, shifting the following
     /// lines' styling up: the mirror of a line being removed from the
     /// buffer. The line that was below the removed one starts at the
-    /// depth the removed line started at, and the lines below it are
-    /// re-styled until the depth reconverges with the stored value.
+    /// state the removed line started at, and the lines below it are
+    /// re-styled until the state reconverges with the stored value.
     /// Rows out of range are ignored.
     pub fn remove_line(&mut self, row: usize) {
         if row >= self.texts.len() {
             return;
         }
-        let depth_in = self.depth_before(row);
-        let old_before = self.depth_after[row];
+        let carry_in = self.carry_before(row);
+        let old_before = self.carry_after[row];
         self.texts.remove(row);
         self.lines.remove(row);
-        self.depth_after.remove(row);
-        self.restyle_suffix(row, depth_in, old_before);
+        self.carry_after.remove(row);
+        self.restyle_suffix(row, carry_in, old_before);
     }
 
     /// Rebuilds the styling of the line at `row` from the line's current
     /// text, dropping any styles previously added to it: the mirror of
     /// the line's text being edited. The line below it — and every line
-    /// below that — may start at a different depth than before, so they
-    /// are re-styled until the depth reconverges with the stored value.
+    /// below that — may start at a different state than before, so they
+    /// are re-styled until the state reconverges with the stored value.
     /// Rows out of range are ignored.
     pub fn refresh_line(&mut self, row: usize, line: &Line) {
         if self.texts.get(row).is_none() {
             return;
         }
-        let old_after = self.depth_after[row];
+        let old_after = self.carry_after[row];
         self.texts[row] = line.clone();
-        let (style, depth) =
-            self.highlighter.base_style_with_depth(line, self.depth_before(row));
+        let (style, carry) =
+            self.highlighter.base_style_with_carry(line, self.carry_before(row));
         self.lines[row] = style;
-        self.depth_after[row] = depth;
-        self.restyle_suffix(row.saturating_add(1), depth, old_after);
+        self.carry_after[row] = carry;
+        self.restyle_suffix(row.saturating_add(1), carry, old_after);
     }
 
     /// Updates the type the styled lines belong to. When it changes, the
@@ -799,9 +996,9 @@ impl Styles {
         }
         self.highlighter = highlighter_for(file_type);
         self.texts = lines.to_vec();
-        let (lines, depth_after) = styled_by(&self.highlighter, &self.texts);
+        let (lines, carry_after) = styled_by(&self.highlighter, &self.texts);
         self.lines = lines;
-        self.depth_after = depth_after;
+        self.carry_after = carry_after;
     }
 
     /// The type of file the styled lines belong to: the type of the
@@ -813,33 +1010,38 @@ impl Styles {
         self.highlighter.file_type()
     }
 
-    /// The multi-line comment depth at the start of the line at `row`:
-    /// the depth the line above it left open, or zero for the first
-    /// line. `row` is at most the number of lines — the depth at the
-    /// end of the document, when a line is inserted below the last one.
-    fn depth_before(&self, row: usize) -> usize {
+    /// The state at the start of the line at `row`: the state the line
+    /// above it left open, or the default for the first line. `row` is
+    /// at most the number of lines — the state at the end of the
+    /// document, when a line is inserted below the last one.
+    fn carry_before(&self, row: usize) -> CarriedState {
         match row {
-            0 => 0,
-            _ => self.depth_after[row.saturating_sub(1)],
+            0 => CarriedState::default(),
+            _ => self.carry_after[row.saturating_sub(1)],
         }
     }
 
-    /// Re-styles the lines from `index` down while the depth they start
-    /// at differs from the depth they started at before the edit:
-    /// `current` is the depth the line above `index` now leaves open,
-    /// and `old_before` is the depth the line at `index` started at
-    /// before the edit. A line that starts at its stored depth, with its
+    /// Re-styles the lines from `index` down while the state they start
+    /// at differs from the state they started at before the edit:
+    /// `current` is the state the line above `index` now leaves open,
+    /// and `old_before` is the state the line at `index` started at
+    /// before the edit. A line that starts at its stored state, with its
     /// text unchanged, styles identically, so the re-style stops the
     /// first time `current` reconverges with `old_before`, and every
     /// line below `index` keeps its styling.
-    fn restyle_suffix(&mut self, mut index: usize, mut current: usize, mut old_before: usize) {
+    fn restyle_suffix(
+        &mut self,
+        mut index: usize,
+        mut current: CarriedState,
+        mut old_before: CarriedState,
+    ) {
         while index < self.lines.len() && current != old_before {
-            let (style, depth) =
-                self.highlighter.base_style_with_depth(&self.texts[index], current);
+            let (style, carry) =
+                self.highlighter.base_style_with_carry(&self.texts[index], current);
             self.lines[index] = style;
-            old_before = self.depth_after[index];
-            self.depth_after[index] = depth;
-            current = depth;
+            old_before = self.carry_after[index];
+            self.carry_after[index] = carry;
+            current = carry;
             index = index.saturating_add(1);
         }
     }
@@ -1171,21 +1373,19 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_marker_inside_a_string_starts_the_comment() {
+    fn a_comment_marker_inside_a_string_starts_no_comment() {
         let highlighter = RustSyntaxHighlighter;
-        // Documented naive behavior: strings are otherwise unstyled by
-        // the highlighter, so the // of "a//b" sits in plain graphemes
-        // and starts the comment; let is the only other span, and the
-        // word runs a and b never start a span — the comment swallows
-        // them.
+        // The // of "a//b" sits inside the string: the string swallows
+        // it, so no comment starts there; let is the only other span, and
+        // the words a and b never start one — the string swallows them.
         let line = Line::from("let s = \"a//b\";");
         let style = highlighter.base_style(&line);
         assert_eq!(
             style.spans(),
-            &[(0..3, Style::Keyword), (10..15, Style::Comment)]
+            &[(0..3, Style::Keyword), (8..14, Style::String)]
         );
-        for i in 10..15 {
-            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        for i in 8..14 {
+            assert_eq!(style.at(i), Style::String, "grapheme {i} of the string");
         }
     }
 
@@ -1442,7 +1642,15 @@ mod tests {
             &[],
             &[(0..4, Style::Literal)],
             &[],
-            &[(0..2, Style::Keyword), (12..15, Style::Keyword), (18..20, Style::Keyword)],
+            // The {i} of the format string sits in the string: the
+            // string swallows it, so the word i never starts a span;
+            // 0..10 is one run that forms no number, so no digit span.
+            &[
+                (0..2, Style::Keyword),
+                (12..15, Style::Keyword),
+                (18..20, Style::Keyword),
+                (38..43, Style::String),
+            ],
             &[
                 (30..32, Style::Digit),
                 (0..3, Style::Keyword),
@@ -1521,11 +1729,11 @@ mod tests {
                 (0..5, Style::Keyword),
                 (10..13, Style::Char),
             ],
-            // The string literal's apostrophe is the line's only quote:
-            // the double quotes are no quotes to the character-literal
-            // rule, so it pairs with nothing; the run after it is a
-            // lifetime.
-            &[(0..3, Style::Keyword), (11..13, Style::Lifetime)],
+            // The string's apostrophe sits in the string: the string
+            // swallows it, so it opens no character literal and no
+            // lifetime run — the whole double-quoted region is one
+            // string span.
+            &[(0..3, Style::Keyword), (8..19, Style::String)],
         ];
         assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
         for (line, want) in lines.iter().zip(expected.iter().copied()) {
@@ -1670,10 +1878,10 @@ mod tests {
             // The // of the literal sits inside it: the whole thing is
             // one character, no comment.
             &[(0..3, Style::Keyword), (8..12, Style::Char)],
-            // The // of the URL sits in a double-quoted string: the
-            // documented naive behavior, the string is otherwise
-            // unstyled, so the marker starts the comment.
-            &[(0..3, Style::Keyword), (16..24, Style::Comment)],
+            // The // of the URL sits inside the string: the string
+            // swallows it, so no comment starts there — the whole
+            // double-quoted region is one string span.
+            &[(0..3, Style::Keyword), (10..23, Style::String)],
             // The apostrophe's lifetime run sits in the comment: it
             // is dropped, the whole line is comment.
             &[(0..17, Style::Comment)],
@@ -1778,9 +1986,130 @@ mod tests {
         for (line, (want, depth)) in
             lines.iter().zip(expected.iter().copied().zip(expected_depths))
         {
-            let (style, out) = highlighter.base_style_with_depth(line, 0);
+            // No line of the corpus carries a double quote, so no line
+            // opens a string: the carry out is the depth alone.
+            let (style, out) = highlighter.base_style_with_carry(line, CarriedState::default());
             assert_eq!(style.spans(), want, "line: {line}");
-            assert_eq!(out, *depth, "line: {line}");
+            assert_eq!(out, CarriedState { ml_depth: *depth, in_string: false }, "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_rust_strings_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/rust_strings.txt pins the string
+        // styling: a plain string, two strings on one line, the empty
+        // string, an escaped closing quote, an apostrophe in the
+        // interior, a // in the interior, a number in the interior, a
+        // multi-line comment's markers in the interior (they count no
+        // depth), a string left open at the end of a line, the line
+        // that closes it, a backslash at the end of an open line, an
+        // escaped quote at the end of an open line, an escaped
+        // backslash before the closing quote, a string carrying a
+        // keyword and a character literal in its interior, two strings
+        // with code between them, and a stray */ after a closed string.
+        // Each line is styled with the state carried in from no earlier
+        // line, and the state the line leaves open is pinned too. The
+        // file is plain text, so the test drives the highlighter
+        // directly rather than going through the file type.
+        let lines: Vec<Line> =
+            fixture_content("rust_strings.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        // The spans each line is styled with, in the fixture's line
+        // order.
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            // The string swallows the word in its interior: no word
+            // span for it, and the string span wins the overlap of no
+            // digit span — there is none on the line.
+            &[(0..3, Style::Keyword), (8..15, Style::String)],
+            // Two strings on one line: each is its own span.
+            &[(0..3, Style::String), (4..7, Style::String)],
+            // The empty string: the two quotes and nothing between.
+            &[(0..2, Style::String)],
+            // The escaped quote is no closer: the string runs to the
+            // last quote.
+            &[(0..6, Style::String)],
+            // The apostrophe sits in the interior: it opens no
+            // character literal and no lifetime run.
+            &[(0..11, Style::String)],
+            // The // sits in the interior: it starts no comment.
+            &[(0..3, Style::Keyword), (8..16, Style::String)],
+            // The digits of 42 carry a digit span under the string,
+            // which is added after it and wins the overlap.
+            &[(9..11, Style::Digit), (0..3, Style::Keyword), (8..12, Style::String)],
+            // The /* and */ sit in the interior: they count no depth,
+            // so the line leaves nothing open despite the markers.
+            &[(0..13, Style::String)],
+            // Left open at the end of the line: the region runs to the
+            // end of the line, and the string carries over.
+            &[(0..3, Style::Keyword), (8..10, Style::String)],
+            // Styled with no string carried in — the per-line rule: b
+            // is a plain word, and the quote opens a string that runs
+            // to the end of the line. In the file's context the line
+            // sits inside the previous line's string; that is pinned
+            // in the multi-line tests below.
+            &[(1..3, Style::String)],
+            // The backslash as the line's last grapheme escapes the
+            // line break itself: it is no closer and leaves no escape
+            // for the next line.
+            &[(0..5, Style::String)],
+            // The escaped quote at the end of the line: the backslash
+            // claims it, so the line carries no closer.
+            &[(0..4, Style::String)],
+            // The escaped backslash: the first backslash escapes the
+            // second, so the quote after them is a plain closer.
+            &[(0..5, Style::String)],
+            // The keyword and the character literal sit in the
+            // interior: neither starts a span of its own, and the
+            // literal's quotes open no lifetime run.
+            &[(0..3, Style::Keyword), (8..19, Style::String)],
+            // Two strings with code between them: the code keeps its
+            // keyword spans, and each string is its own span.
+            &[
+                (0..3, Style::Keyword),
+                (13..16, Style::Keyword),
+                (8..11, Style::String),
+                (21..24, Style::String),
+            ],
+            // A stray */ with no comment open — the string that
+            // carried its markers on an earlier line counted none —
+            // changes nothing: the line keeps only its digit span.
+            &[(4..5, Style::Digit)],
+        ];
+        // The state each line leaves open for the next line: an open
+        // string for the four lines left open at their end (lines 9,
+        // 10, 11, and 12); zero depth throughout — no line of the
+        // corpus counts a /* outside a string — and no string for the
+        // rest.
+        let expected_states: &[CarriedState] = &[
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: true },
+            CarriedState { ml_depth: 0, in_string: true },
+            CarriedState { ml_depth: 0, in_string: true },
+            CarriedState { ml_depth: 0, in_string: true },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+            CarriedState { ml_depth: 0, in_string: false },
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        assert_eq!(
+            lines.len(),
+            expected_states.len(),
+            "the fixture's line count changed"
+        );
+        for (line, (want, state)) in
+            lines.iter().zip(expected.iter().copied().zip(expected_states))
+        {
+            let (style, out) = highlighter.base_style_with_carry(line, CarriedState::default());
+            assert_eq!(style.spans(), want, "line: {line}");
+            assert_eq!(out, *state, "line: {line}");
         }
     }
 
@@ -1792,12 +2121,13 @@ mod tests {
         // and the regular highlighting resumes after the marker on the
         // same line: the keyword and the digit keep their spans.
         let line = Line::from("still in comment */ let x = 42;");
-        let (style, depth) = highlighter.base_style_with_depth(&line, 1);
+        let (style, carry) = highlighter
+            .base_style_with_carry(&line, CarriedState { ml_depth: 1, in_string: false });
         assert_eq!(
             style.spans(),
             &[(28..30, Style::Digit), (20..23, Style::Keyword), (0..19, Style::Comment)]
         );
-        assert_eq!(depth, 0, "the */ on the line closes the comment");
+        assert_eq!(carry.ml_depth, 0, "the */ on the line closes the comment");
         for i in 0..19 {
             assert_eq!(style.at(i), Style::Comment, "grapheme {i} of the region");
         }
@@ -1813,9 +2143,9 @@ mod tests {
         // usual — the digit keeps its span — and is not swallowed by a
         // // comment to the end of the line.
         let line = Line::from("/* a // b */ x = 42;");
-        let (style, depth) = highlighter.base_style_with_depth(&line, 0);
+        let (style, carry) = highlighter.base_style_with_carry(&line, CarriedState::default());
         assert_eq!(style.spans(), &[(17..19, Style::Digit), (0..12, Style::Comment)]);
-        assert_eq!(depth, 0);
+        assert_eq!(carry.ml_depth, 0);
         for i in 13..19 {
             assert!(style.at(i) != Style::Comment, "grapheme {i} after the marker");
         }
@@ -1851,6 +2181,70 @@ mod tests {
             styles.line(3).unwrap().spans(),
             &[(8..9, Style::Digit), (0..3, Style::Keyword)]
         );
+    }
+
+    #[test]
+    fn an_unclosed_string_at_end_of_file_is_carried_by_insertion() {
+        // The buffer's newline-below-the-last-line path is an insert at
+        // the end: the inserted line starts in the state the last line
+        // left open — the string still open — so it sits inside the
+        // string from column zero until the " that closes it.
+        let mut styles = Styles::for_lines(
+            FileType::Rust,
+            &[Line::from("let s = \"a"), Line::from("b\"; let x = 1;")],
+        );
+        assert_eq!(
+            styles.line(0).unwrap().spans(),
+            &[(0..3, Style::Keyword), (8..10, Style::String)]
+        );
+        // The line inside the string: the string from column zero to
+        // the closing quote, then regular code — the keyword and the
+        // digit keep their spans after the quote.
+        assert_eq!(
+            styles.line(1).unwrap().spans(),
+            &[(12..13, Style::Digit), (4..7, Style::Keyword), (0..2, Style::String)]
+        );
+
+        // A line appended at the end below the closed string is regular
+        // code again: the string is closed, so the carry is the default.
+        styles.insert_line(2, &Line::from("let y = 2;"));
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(8..9, Style::Digit), (0..3, Style::Keyword)]
+        );
+
+        // And a line appended at the end while the file ends with a
+        // string open continues it from column zero.
+        let mut styles = Styles::for_lines(FileType::Rust, &[Line::from("let s = \"a")]);
+        styles.insert_line(1, &Line::from("b\";"));
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..2, Style::String)]);
+    }
+
+    #[test]
+    fn removing_a_line_inside_a_string_restyles_the_suffix() {
+        // The buffer's line-removal path: the line below the removed
+        // one starts in the state the removed line started in — the
+        // string carried over from the line above — and the suffix is
+        // re-styled from there.
+        let mut lines = vec![
+            Line::from("let s = \"a"),
+            Line::from("b\";"),
+            Line::from("let c = 3;"),
+        ];
+        let mut styles = Styles::for_lines(FileType::Rust, &lines);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..2, Style::String)]);
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(8..9, Style::Digit), (0..3, Style::Keyword)]
+        );
+
+        // Remove the line that closes the string: the string stays open
+        // past the first line, so the line below (formerly the third)
+        // sits inside it from column zero — the keyword and the digit
+        // span of 3 sit under the string span.
+        lines.remove(1);
+        styles.remove_line(1);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(8..9, Style::Digit), (0..10, Style::String)]);
     }
 
     #[test]
@@ -2069,26 +2463,35 @@ mod tests {
         // regular code. The quote that opens the literal sits in the
         // comment region, so it starts no literal.
         let line = Line::from("let c = '*/';");
-        let (style, depth) = highlighter.base_style_with_depth(&line, 1);
+        let (style, carry) = highlighter
+            .base_style_with_carry(&line, CarriedState { ml_depth: 1, in_string: false });
         assert_eq!(style.spans(), &[(0..11, Style::Comment)]);
-        assert_eq!(depth, 0, "the */ in the literal's interior closes the comment");
+        assert_eq!(
+            carry.ml_depth, 0,
+            "the */ in the literal's interior closes the comment"
+        );
     }
 
     #[test]
-    fn the_plain_text_highlighter_carries_no_ml_comment_depth() {
+    fn the_plain_text_highlighter_carries_no_carry() {
         let highlighter = PlainTextSyntaxHighlighter;
-        // Plain text styles nothing, and its depth stays zero: a line
-        // that opens and closes a comment on its own leaves none open.
-        let (style, depth) =
-            highlighter.base_style_with_depth(&Line::from("/* a */ let x = 1;"), 0);
+        // Plain text styles nothing, and its carry stays at the default:
+        // a line that opens and closes a comment and a string on its own
+        // leaves nothing open.
+        let (style, carry) =
+            highlighter
+                .base_style_with_carry(&Line::from("/* a */ let s = \"b\";"), CarriedState::default());
         let no_spans: &[(Range<usize>, Style)] = &[];
         assert_eq!(style.spans(), no_spans);
-        assert_eq!(depth, 0);
-        // And a depth carried in from an earlier line — impossible for
-        // plain text, but the default must stay total — leaves zero.
-        let (style, depth) = highlighter.base_style_with_depth(&Line::from("let x = 1;"), 3);
+        assert_eq!(carry, CarriedState::default());
+        // And a carry in from an earlier line — impossible for plain
+        // text, but the default must stay total — leaves the default.
+        let (style, carry) = highlighter.base_style_with_carry(
+            &Line::from("let x = 1;"),
+            CarriedState { ml_depth: 3, in_string: true },
+        );
         assert_eq!(style.spans(), no_spans);
-        assert_eq!(depth, 0);
+        assert_eq!(carry, CarriedState::default());
     }
 
     #[test]
@@ -2128,11 +2531,11 @@ mod tests {
         let content = fixture_content("styling_demo.rs");
         let lines: Vec<Line> = content.lines().map(Line::from).collect();
         let highlighter = RustSyntaxHighlighter;
-        let mut depth = 0;
-        let mut styles: Vec<(LineStyle, usize)> = Vec::new();
+        let mut carry = CarriedState::default();
+        let mut styles: Vec<(LineStyle, CarriedState)> = Vec::new();
         for line in &lines {
-            let (style, out) = highlighter.base_style_with_depth(line, depth);
-            depth = out;
+            let (style, out) = highlighter.base_style_with_carry(line, carry);
+            carry = out;
             styles.push((style, out));
         }
         let opening = lines
@@ -2147,7 +2550,10 @@ mod tests {
             &[(4..38, Style::Comment)],
             "the opening line of the demo's multi-line comment"
         );
-        assert_eq!(styles[opening].1, 1);
+        assert_eq!(
+            styles[opening].1,
+            CarriedState { ml_depth: 1, in_string: false }
+        );
         // The line inside the comment: comment from column zero to the
         // end of the line, the digit span of 42 under it, the depth
         // still carried.
@@ -2156,7 +2562,10 @@ mod tests {
             &[(18..20, Style::Digit), (0..39, Style::Comment)],
             "the line inside the demo's multi-line comment"
         );
-        assert_eq!(styles[opening.saturating_add(1)].1, 1);
+        assert_eq!(
+            styles[opening.saturating_add(1)].1,
+            CarriedState { ml_depth: 1, in_string: false }
+        );
         // The line that carries the nested comment and the code after
         // the closing marker: the region is comment from column zero to
         // the final */, the code after it is regular — keyword, type,
@@ -2174,11 +2583,16 @@ mod tests {
             ],
             "the demo's nested comment line and the code after its */"
         );
-        assert_eq!(styles[closing].1, 0);
+        assert_eq!(
+            styles[closing].1,
+            CarriedState { ml_depth: 0, in_string: false }
+        );
         // The line below the comment is regular code with no spans,
-        // and the file leaves no comment open at the end.
+        // and the file leaves nothing open at the end — no comment, no
+        // string: the demo's multi-line string closes on its second
+        // line, and the rest close on their own line.
         assert_eq!(styles[closing.saturating_add(1)].0.spans(), &[]);
-        assert_eq!(depth, 0, "the demo's file leaves no multi-line comment open");
+        assert_eq!(carry, CarriedState::default(), "the demo's file leaves nothing open");
     }
 
     #[test]
@@ -2236,6 +2650,289 @@ mod tests {
         // A dot after the quote is not a run character.
         assert_eq!(
             highlighter.base_style(&Line::from("'.x")).spans(),
+            no_spans
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_string_including_its_quotes() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("let s = \"hi\";");
+        let style = highlighter.base_style(&line);
+        // The string is the opening quote, the interior, and the
+        // closing quote: one span, every grapheme of it the string
+        // color.
+        assert_eq!(
+            style.spans(),
+            &[(0..3, Style::Keyword), (8..12, Style::String)]
+        );
+        for i in 8..12 {
+            assert_eq!(style.at(i), Style::String, "grapheme {i} of the string");
+        }
+        assert_eq!(style.at(7), Style::None, "the space before the string stays plain");
+        assert_eq!(style.at(12), Style::None, "the semicolon after the string stays plain");
+    }
+
+    #[test]
+    fn the_rust_highlighter_escapes_the_closing_quote_of_a_string() {
+        let highlighter = RustSyntaxHighlighter;
+        // The escaped quote is not the closer: the string runs to the
+        // last quote, the assignment's example — a valid string ending
+        // in an escaped quote.
+        let line = Line::from("\"Look at this: \\\"\"");
+        let style = highlighter.base_style(&line);
+        assert_eq!(style.spans(), &[(0..18, Style::String)]);
+        for i in 0..18 {
+            assert_eq!(style.at(i), Style::String, "grapheme {i} of the string");
+        }
+    }
+
+    #[test]
+    fn a_string_left_open_at_end_of_line_carries_over() {
+        let highlighter = RustSyntaxHighlighter;
+        // No closing quote on the line: the region runs to the end of
+        // the line, and the string carries over to the next one.
+        let (style, carry) =
+            highlighter.base_style_with_carry(&Line::from("let s = \"a"), CarriedState::default());
+        assert_eq!(
+            style.spans(),
+            &[(0..3, Style::Keyword), (8..10, Style::String)]
+        );
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: true });
+    }
+
+    #[test]
+    fn a_line_that_starts_inside_a_string_is_string_until_the_quote() {
+        let highlighter = RustSyntaxHighlighter;
+        // Styled with the string carried over from an earlier line, the
+        // line is string from column zero to the closing quote, and the
+        // regular highlighting resumes after it on the same line: the
+        // keyword and the digit keep their spans.
+        let line = Line::from("b\"; let x = 42;");
+        let (style, carry) = highlighter
+            .base_style_with_carry(&line, CarriedState { ml_depth: 0, in_string: true });
+        assert_eq!(
+            style.spans(),
+            &[(12..14, Style::Digit), (4..7, Style::Keyword), (0..2, Style::String)]
+        );
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+        for i in 0..2 {
+            assert_eq!(style.at(i), Style::String, "grapheme {i} of the string");
+        }
+        assert_eq!(style.at(2), Style::None, "the semicolon after the quote stays plain");
+    }
+
+    #[test]
+    fn a_backslash_at_end_of_line_escapes_the_line_break_not_the_next_line() {
+        let highlighter = RustSyntaxHighlighter;
+        // The backslash escapes the line break itself, which no line's
+        // graphemes carry: the string carries over, and the next line's
+        // first grapheme is not escaped — it is ordinary interior.
+        let (_, carry) = highlighter
+            .base_style_with_carry(&Line::from("\"abc\\"), CarriedState::default());
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: true });
+        let (style, carry) = highlighter
+            .base_style_with_carry(&Line::from("d\";"), CarriedState { ml_depth: 0, in_string: true });
+        assert_eq!(style.spans(), &[(0..2, Style::String)]);
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn an_escaped_backslash_leaves_the_quote_a_closer() {
+        let highlighter = RustSyntaxHighlighter;
+        // The first backslash escapes the second, so the quote after
+        // them is a plain closer: the string closes on the line.
+        let (style, carry) =
+            highlighter
+                .base_style_with_carry(&Line::from("\"a\\\\\""), CarriedState::default());
+        assert_eq!(style.spans(), &[(0..5, Style::String)]);
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn an_ml_comment_inside_a_string_counts_no_depth() {
+        let highlighter = RustSyntaxHighlighter;
+        // The /* in the string's interior counts no depth: the line
+        // leaves the string open, but the depth stays at zero — no
+        // comment opens in the string.
+        let (style, carry) =
+            highlighter
+                .base_style_with_carry(&Line::from("\"a /* b"), CarriedState::default());
+        assert_eq!(style.spans(), &[(0..7, Style::String)]);
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: true });
+        // And the */ in the string's interior counts no depth either:
+        // the line sits inside the string from column zero to the
+        // closing quote, and the comment never opened, so nothing
+        // closes.
+        let line = Line::from("*/ c\";");
+        let (style, carry) = highlighter
+            .base_style_with_carry(&line, CarriedState { ml_depth: 0, in_string: true });
+        assert_eq!(style.spans(), &[(0..5, Style::String)]);
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn a_string_inside_an_ml_comment_opens_no_string() {
+        let highlighter = RustSyntaxHighlighter;
+        // The double quote sits in the comment region: the region
+        // swallows it, so it opens no string — the carry out carries no
+        // string — and the code after the */ keeps its digit span.
+        let (style, carry) = highlighter
+            .base_style_with_carry(&Line::from("/* \" a */ x = 42;"), CarriedState::default());
+        assert_eq!(
+            style.spans(),
+            &[(14..16, Style::Digit), (0..9, Style::Comment)]
+        );
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn a_double_quote_in_a_single_line_comment_opens_no_string() {
+        let highlighter = RustSyntaxHighlighter;
+        // The // owns the rest of the line: the double quote in it
+        // opens no string, so nothing carries over.
+        let (style, carry) =
+            highlighter
+                .base_style_with_carry(&Line::from("// \" a"), CarriedState::default());
+        assert_eq!(style.spans(), &[(0..6, Style::Comment)]);
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn a_string_and_a_comment_on_one_line() {
+        let highlighter = RustSyntaxHighlighter;
+        // The string closes before the marker: the // after it starts
+        // the comment, and the double quote in the comment opens no
+        // string — the carry out carries no string.
+        let (style, carry) = highlighter
+            .base_style_with_carry(&Line::from("let s = \"a\"; // \" b"), CarriedState::default());
+        assert_eq!(
+            style.spans(),
+            &[(0..3, Style::Keyword), (8..11, Style::String), (13..19, Style::Comment)]
+        );
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn a_double_quote_inside_a_character_literal_opens_no_string() {
+        let highlighter = RustSyntaxHighlighter;
+        // The double quote sits in the character literal's interior:
+        // the literal swallows it, so it opens no string.
+        let (style, carry) =
+            highlighter
+                .base_style_with_carry(&Line::from("'\"' x = 42;"), CarriedState::default());
+        assert_eq!(
+            style.spans(),
+            &[(8..10, Style::Digit), (0..3, Style::Char)]
+        );
+        assert_eq!(carry, CarriedState { ml_depth: 0, in_string: false });
+    }
+
+    #[test]
+    fn an_unclosed_string_at_end_of_file_keeps_its_lines_strings() {
+        // The buffer's top-to-bottom styling carries the string across
+        // the lines: the first line's string runs to the end of the
+        // line, the second sits inside it from column zero to the
+        // closing quote, and the code after the quote is regular.
+        let lines = [Line::from("let s = \"a"), Line::from("b\"; let x = 42;")];
+        let styles = Styles::for_lines(FileType::Rust, &lines);
+        assert_eq!(
+            styles.line(0).unwrap().spans(),
+            &[(0..3, Style::Keyword), (8..10, Style::String)]
+        );
+        assert_eq!(
+            styles.line(1).unwrap().spans(),
+            &[(12..14, Style::Digit), (4..7, Style::Keyword), (0..2, Style::String)]
+        );
+    }
+
+    #[test]
+    fn a_string_that_spans_three_lines_keeps_its_span_on_each_line() {
+        // The string opens on the first line, runs over the middle line
+        // whole, and closes on the third: each line carries a string
+        // span — the first from the opening quote to the end of the
+        // line, the middle from column zero to the end of the line, the
+        // third from column zero to the closing quote — and the code
+        // after the closing quote is regular.
+        let lines = [
+            Line::from("let s = \"a"),
+            Line::from("middle b"),
+            Line::from("end\"; let x = 1;"),
+        ];
+        let styles = Styles::for_lines(FileType::Rust, &lines);
+        assert_eq!(
+            styles.line(0).unwrap().spans(),
+            &[(0..3, Style::Keyword), (8..10, Style::String)]
+        );
+        // The middle line sits inside the string from column zero: no
+        // word starts a span in it — the string swallows middle and b.
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..8, Style::String)]);
+        // The third line: the string from column zero to the closing
+        // quote, then regular code — the keyword and the digit keep
+        // their spans after the quote.
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(14..15, Style::Digit), (6..9, Style::Keyword), (0..4, Style::String)]
+        );
+    }
+
+    #[test]
+    fn editing_a_line_inside_a_string_restyles_the_suffix_until_it_closes() {
+        // The buffer's edit path is refresh_line: deleting the string's
+        // closing quote makes the string run over the next line, and
+        // typing it back closes it — the suffix is re-styled in both
+        // directions, the way the multi-line comment's re-style works.
+        let mut lines = vec![
+            Line::from("let s = \"a"),
+            Line::from("b\";"),
+            Line::from("let c = 3;"),
+        ];
+        let mut styles = Styles::for_lines(FileType::Rust, &lines);
+        // The string runs from line 0 to the closing quote on line 1:
+        // line 1 sits inside it from column zero, and line 2 is
+        // regular code.
+        assert_eq!(
+            styles.line(0).unwrap().spans(),
+            &[(0..3, Style::Keyword), (8..10, Style::String)]
+        );
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..2, Style::String)]);
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(8..9, Style::Digit), (0..3, Style::Keyword)]
+        );
+
+        // Delete the closing quote on line 1: the string stays open
+        // past line 1, so line 2 sits inside it from column zero — the
+        // re-style runs the whole suffix, and the keyword and digit
+        // spans of line 2 sit under the string span.
+        lines[1] = Line::from("b;");
+        styles.refresh_line(1, &lines[1]);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..2, Style::String)]);
+        // The digit span of 3 stays under the string, which wins the
+        // overlap, and the keyword and digit spans sit inside the
+        // string's region on line 2.
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(8..9, Style::Digit), (0..10, Style::String)]
+        );
+
+        // Type the closing quote back on line 1: the string closes
+        // there, and line 2 is regular code again.
+        lines[1] = Line::from("b\";");
+        styles.refresh_line(1, &lines[1]);
+        assert_eq!(styles.line(1).unwrap().spans(), &[(0..2, Style::String)]);
+        assert_eq!(
+            styles.line(2).unwrap().spans(),
+            &[(8..9, Style::Digit), (0..3, Style::Keyword)]
+        );
+    }
+
+    #[test]
+    fn the_plain_text_highlighter_does_not_style_strings() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter.base_style(&Line::from("let s = \"a // b\"; \"c")).spans(),
             no_spans
         );
     }

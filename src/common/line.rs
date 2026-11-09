@@ -150,6 +150,13 @@ impl Line {
         text == "'"
     }
 
+    /// Whether the grapheme at `grapheme_index` is a double quote — the
+    /// delimiter that opens and closes a string literal. A multi-char
+    /// cluster like a keycap emoji is not one.
+    pub(crate) fn is_double_quote(&self, grapheme_index: usize) -> bool {
+        self.display_text_of(grapheme_index) == "\""
+    }
+
     /// Whether the grapheme at `grapheme_index` opens a comment marker:
     /// the grapheme and the one after it are both forward slashes — the
     /// `//` of a single-line comment. A multi-char cluster like a keycap
@@ -301,6 +308,28 @@ impl Line {
                 return Some(index.saturating_add(1));
             }
             index = index.saturating_add(1);
+        }
+        None
+    }
+
+    /// The grapheme index just past the closing quote of a string whose
+    /// interior starts at grapheme `interior_start`, or `None` when the
+    /// line carries no closing quote: a backslash escapes the grapheme
+    /// it precedes, so an escaped `\"` is not a closer, and the first
+    /// unescaped double quote closes the string. A backslash as the
+    /// line's last
+    /// grapheme escapes the line break itself, which no line's graphemes
+    /// carry, so it leaves the string open for the next line. An
+    /// `interior_start` past the end of the line yields `None`.
+    pub fn string_end_from(&self, interior_start: usize) -> Option<usize> {
+        let len = self.fragments.len();
+        let mut index = interior_start;
+        while index < len {
+            match self.display_text_of(index) {
+                "\\" => index = index.saturating_add(2),
+                "\"" => return Some(index.saturating_add(1)),
+                _ => index = index.saturating_add(1),
+            }
         }
         None
     }
@@ -1484,6 +1513,61 @@ mod tests {
         // the last quote.
         let line = Line::from("'\\\\'");
         assert_eq!(line.char_literal_end(0), Some(4));
+    }
+
+    #[test]
+    fn string_end_from_of_a_plain_string_is_past_the_closing_quote() {
+        let line = Line::from("\"hello\"");
+        assert_eq!(line.string_end_from(1), Some(7));
+    }
+
+    #[test]
+    fn string_end_from_of_an_empty_string_is_past_the_second_quote() {
+        let line = Line::from("\"\"");
+        assert_eq!(line.string_end_from(1), Some(2));
+    }
+
+    #[test]
+    fn string_end_from_honors_escaped_quotes_anywhere_in_the_interior() {
+        // Unlike a character literal, a string may carry an escape at
+        // any position of its interior, not just after the opening
+        // quote: the backslash escapes the quote it precedes, so the
+        // closer is the very last quote.
+        let line = Line::from("\"Look at this: \\\"\"");
+        assert_eq!(line.string_end_from(1), Some(18));
+        let line = Line::from("\"a\\\"b\"");
+        assert_eq!(line.string_end_from(1), Some(6));
+    }
+
+    #[test]
+    fn string_end_from_of_an_escaped_backslash_takes_the_next_quote() {
+        // The first backslash escapes the second, so the quote after
+        // them is a plain closer.
+        let line = Line::from("\"a\\\\\"");
+        assert_eq!(line.string_end_from(1), Some(5));
+    }
+
+    #[test]
+    fn string_end_from_of_a_backslash_at_end_of_line_is_none() {
+        // The backslash escapes the line break itself, which no line's
+        // graphemes carry: it leaves the string open for the next line.
+        let line = Line::from("\"abc\\");
+        assert_eq!(line.string_end_from(1), None);
+        let line = Line::from("\"a\\\\\"");
+        assert_eq!(line.string_end_from(1), Some(5));
+    }
+
+    #[test]
+    fn string_end_from_of_a_string_without_a_closer_is_none() {
+        let line = Line::from("\"a");
+        assert_eq!(line.string_end_from(1), None);
+    }
+
+    #[test]
+    fn string_end_from_past_the_end_of_the_line_is_none() {
+        let line = Line::from("\"a\"");
+        assert_eq!(line.string_end_from(3), None);
+        assert_eq!(line.string_end_from(100), None);
     }
 
     #[test]

@@ -250,6 +250,25 @@ impl Terminal {
         Self::print(&styled_str)
     }
 
+    /// Prints a string literal at the cursor's current position in warm
+    /// orange text, with no background, continuing the row rather than
+    /// rewriting it. The string's orange leans red — clearly less green
+    /// and a touch of blue — while the character literal's amber leans
+    /// yellow, so the two warm colors stay apart in the palette.
+    pub fn print_string(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 235,
+                g: 125,
+                b: 55,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a lifetime specifier at the cursor's current position in
     /// teal text, with no background, continuing the row rather than
     /// rewriting it. The teal is the only color in the palette that is

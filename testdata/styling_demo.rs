@@ -7,6 +7,11 @@
 //   purple      literals & variants (Some, None, Ok, Err, true, false)
 //   steel blue  numbers           (42, 3.14, 50e10, 0x1f, 0b1010, 0o17)
 //   amber       character literals ('a', '\'' , 'é')
+//   orange      strings           ("hello", "a\"b": an escaped " is no
+//                                  closer; a string left open at the end
+//                                  of a line continues on the next; a
+//                                  marker in the interior — // or /* —
+//                                  counts nothing)
 //   teal        lifetime specifiers ('static, '_, 'a_b2)
 //   dark green  comments          (// to the end of the line, marker
 //                                  included; nothing else colored in one)
@@ -36,7 +41,7 @@ fn char_code(c: char) -> u8 {
 }
 
 fn pairing() -> char {
-    let note = "don't panic: 'ok'"; // naive: the apostrophe pairs with the next quote
+    let note = "don't panic: 'ok'"; // the string swallows the apostrophe
     note.chars().next().unwrap_or('?')
 }
 
@@ -48,8 +53,8 @@ fn elided(s: &'_ str) -> &'_ str {
     s
 }
 
-// The apostrophe below opens no character literal, so the run after it
-// is read as a lifetime: a naive-pairing consequence, pinned here.
+// The apostrophe of the string's interior opens no character literal
+// and no lifetime run: the string swallows it, pinned here.
 fn possessive(owner: &str) -> &str {
     &format!("owner's name: {owner}")
 }
@@ -65,7 +70,7 @@ fn lifetime_block<'a, 'b>(
 ) -> &'a str {
     let quoted: char = 'q'; // a char literal, not a lifetime
     let elided: &'_ str = x;
-    let tag = format!("'{}", quoted); // the ' here: a lifetime run
+    let tag = format!("'{}", quoted); // the ' is in the string: no lifetime run
     let joined = elided.to_owned() + &tag; // a String, so no return lifetime
     drop((c, d, joined));
     x
@@ -107,6 +112,15 @@ fn block_comments() -> u128 {
        mentioning 42 and a keyword let,
        and a nested /* inner */ comment */ let n: u128 = 7; // resumes here
     n
+}
+
+fn string_demo() -> u8 {
+    let plain = "hello"; // orange, quotes included
+    let escaped = "Look at this: \""; // the \" is no closer
+    let open = "a
+b"; // a string left open at the end of a line
+    let marker = "42 /* let 'a' // */"; // markers in the interior count nothing
+    plain.len() as u8 + escaped.len() as u8 + open.len() as u8 + marker.len() as u8
 }
 
 fn main() {

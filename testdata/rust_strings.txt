@@ -1,0 +1,16 @@
+let s = "hello";
+"a" "b"
+""
+"a\"b"
+"it's fine"
+let s = "a // b";
+let s = "42";
+"a /* b */ c"
+let s = "a
+b";
+"abc\
+"a\"
+"a\\"
+let s = "let 'a' x";
+let a = "x"; let b = "y";
+x = 1; */
