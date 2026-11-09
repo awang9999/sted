@@ -1,0 +1,11 @@
+// a plain comment
+    // an indented comment
+/// a doc comment
+//! a module doc comment
+// let n: u128 = 42; 'a' 'static
+let x = 1; // trailing comment
+let a = 10 / 5;
+let c = '//';
+let url = "http://sted";
+// it's a comment
+let y = 2; //

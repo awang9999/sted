@@ -8,8 +8,10 @@
 //   steel blue  numbers           (42, 3.14, 50e10, 0x1f, 0b1010, 0o17)
 //   amber       character literals ('a', '\'' , 'é')
 //   teal        lifetime specifiers ('static, '_, 'a_b2)
+//   dark green  comments          (// to the end of the line, marker
+//                                  included; nothing else colored in one)
 //
-// Nothing below should be colored (see the last comment block).
+// No non-comment colors below (see the last comment block).
 
 pub struct Point {
     x: f64,
@@ -91,6 +93,11 @@ fn measure() -> Result<u128, String> {
     Ok(big + small as u128 + bits as u128 + octal as u128)
 }
 
+fn comment_demo() -> u128 {
+    let n: u128 = 42; // let 'a' 'static 42: keyword, char, lifetime, digit — all comment
+    n
+}
+
 fn main() {
     let point = Point { x: 3.14, y: 0.0 };
     match first_char(describe(&vec![point])) {
@@ -103,7 +110,7 @@ fn main() {
     }
 }
 
-// --- nothing below should be colored --------------------------------------
+// --- no non-comment colors below ------------------------------------------
 // static   — deliberately excluded from the keyword list
 // myself   — a different word that contains a keyword
 // iffy     — a different word that contains a keyword

@@ -150,6 +150,19 @@ impl Line {
         text == "'"
     }
 
+    /// Whether the grapheme at `grapheme_index` opens a comment marker:
+    /// the grapheme and the one after it are both forward slashes — the
+    /// `//` of a single-line comment. A multi-char cluster like a keycap
+    /// emoji is no slash, and an index at or past the penultimate
+    /// grapheme leaves no grapheme for the second slash.
+    pub(crate) fn starts_comment(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        let next = grapheme_index.saturating_add(1);
+        text == "/"
+            && next < self.fragments.len()
+            && self.display_text_of(next) == "/"
+    }
+
     /// The grapheme spans of the line's words, in the order they occur
     /// in the line. A word is one maximal run of ASCII identifier
     /// characters (`[A-Za-z0-9_]`), and every run is reported, whatever
@@ -1182,6 +1195,18 @@ mod tests {
                 (" ", Style::None),
                 ("456", Style::Digit)
             ]
+        );
+    }
+
+    #[test]
+    fn display_segments_marks_a_comment_over_the_digits_inside_it() {
+        // The digits of 42 carry a base digit span under the comment;
+        // the comment span is added last, so the whole line renders as
+        // one comment segment — no digit segment survives.
+        let line = Line::from("// let n = 42;");
+        assert_eq!(
+            segments_as_pairs(&line.display_segments(&(0..20), &base_style(&line))),
+            vec![("// let n = 42;", Style::Comment)]
         );
     }
 

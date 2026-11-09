@@ -270,6 +270,26 @@ impl Terminal {
         Self::print(&styled_str)
     }
 
+    /// Prints a comment at the cursor's current position in dark green
+    /// text, with no background, continuing the row rather than
+    /// rewriting it. It is green like the type color, but clearly
+    /// darker: a comment annotates the code, so it recedes from the
+    /// types and the rest of the palette rather than competing with
+    /// them.
+    pub fn print_comment(string: &str) -> Result<(), Error> {
+        let styled_str = format!(
+            "{}{}{}",
+            SetForegroundColor(Color::Rgb {
+                r: 70,
+                g: 130,
+                b: 80,
+            }),
+            string,
+            Attribute::Reset
+        );
+        Self::print(&styled_str)
+    }
+
     /// Prints a search match at the cursor's current position: black text
     /// on a warm mid-gray background, continuing the row rather than
     /// rewriting it. The warm gray carries a subtle yellow tinge, bright

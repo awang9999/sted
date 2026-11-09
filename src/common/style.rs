@@ -11,7 +11,9 @@ use std::sync::Arc;
 /// color, keywords in the keyword color, common type names in the type
 /// color, literals and enum-variant names in the literal color, and
 /// character literals in the character color. Lifetime specifiers are
-/// drawn in the lifetime color.
+/// drawn in the lifetime color. A single-line comment — a `//` marker
+/// and everything to the end of the line, marker included — is drawn in
+/// the comment color.
 ///
 /// This is the palette of the buffer's styling: a syntax coloring pass
 /// (keywords, strings, comments, ...) adds to it, and the view learns to
@@ -44,6 +46,9 @@ pub enum Style {
     /// the name itself — `'static`, `'_`, `'a_b2` —: drawn in the
     /// lifetime color.
     Lifetime,
+    /// A single-line comment — the `//` marker and everything to the
+    /// end of the line, marker included: drawn in the comment color.
+    Comment,
 }
 
 /// The styling of one line of a buffer: the grapheme spans that carry a
@@ -174,6 +179,22 @@ impl SyntaxHighlighter for PlainTextSyntaxHighlighter {
 /// lifetime. As with the character literals, the pairing is naive: an
 /// apostrophe in prose that opens no literal starts a lifetime run of
 /// whatever identifier characters follow it on the line.
+///
+/// Single-line comments are styled too: the first `//` in the line
+/// whose first slash sits in a plain grapheme — the slashes of a
+/// character literal are skipped with the literal, so the `//` inside
+/// `'//'` is no marker — and everything to the end of the line, marker
+/// included, carries [`Style::Comment`]. A single slash is no comment;
+/// `///` doc comments and `//!` module doc comments are ordinary
+/// comments with no special treatment. No other base highlighting
+/// starts inside a comment: no word, character-literal, or lifetime
+/// span may start at or after the marker — the comment swallows the
+/// rest of the line the way a character literal swallows its
+/// interior. A `//` inside a double-quoted string still starts a
+/// comment: strings are otherwise unstyled by the highlighter, so
+/// their slashes are plain graphemes. The comment span is added after
+/// every other span, so it wins the overlap of the digit spans of any
+/// numbers the comment mentions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RustSyntaxHighlighter;
 
@@ -215,13 +236,18 @@ const LITERALS: &[&str] = &["Some", "None", "Ok", "Err", "true", "false"];
 /// from `position` up to (exclusive) `limit`: a quote that opens a
 /// character literal claims everything up to the literal's end — the
 /// grapheme just past its closing quote — and the remaining graphemes
-/// stay plain.
+/// stay plain. The walk also records in `comment_start` the first `//`
+/// marker it meets in the plain graphemes — a marker inside a character
+/// literal is skipped with the literal, so it is not one — and stops
+/// there: from the marker to the end of the line is comment, so the
+/// walk of the plain graphemes ends with it.
 fn advance_past_literals(
     position: usize,
     limit: usize,
     line: &Line,
     style: &mut LineStyle,
     char_spans: &mut Vec<Range<usize>>,
+    comment_start: &mut Option<usize>,
 ) -> usize {
     let mut position = position;
     while position < limit {
@@ -230,6 +256,10 @@ fn advance_past_literals(
             char_spans.push(position..end);
             position = end;
             continue;
+        }
+        if comment_start.is_none() && line.starts_comment(position) {
+            *comment_start = Some(position);
+            return position;
         }
         position = position.saturating_add(1);
     }
@@ -259,21 +289,32 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
     /// of its words that is a keyword, a common type name, or a literal
     /// or enum-variant name, the character style over each character
     /// literal — the opening quote, its interior, and its closing
-    /// quote — and the lifetime style over each lifetime specifier —
-    /// a quote that opens no character literal, followed by a run of
-    /// identifier characters.
+    /// quote — the lifetime style over each lifetime specifier — a
+    /// quote that opens no character literal, followed by a run of
+    /// identifier characters — and the comment style over the
+    /// line's single-line comment — the first `//` marker whose first
+    /// slash sits in a plain grapheme, and everything to the end of the
+    /// line, marker included.
     ///
-    /// The spans land in two phases, and a later span wins an overlap:
-    /// first the digit spans, then the word spans — so a type like
-    /// `u128` or `i8` renders fully in the type color, over the digit
-    /// spans of its inner digits. The words and the character literals
-    /// are found in one scan, in line order: a word run that is in one
-    /// of the lists carries that list's style, and a quote that opens a
-    /// character literal hands the scan to the literal parser, whose
-    /// end — the grapheme just past the closing quote — is where the
-    /// scan resumes. The interior words of a literal are never visited,
-    /// so no word or keyword span is ever added inside one, and a
-    /// literal's span wins the overlap of any digit spans inside it.
+    /// The spans land in three phases, and a later span wins an
+    /// overlap: first the digit spans, then the word and
+    /// character-literal spans — so a type like `u128` or `i8` renders
+    /// fully in the type color, over the digit spans of its inner
+    /// digits — and finally the comment span, which wins the overlap
+    /// of any digit span the comment sits over. The words and the
+    /// character literals are found in one scan, in line order: a word
+    /// run that is in one of the lists carries that list's style, and a
+    /// quote that opens a character literal hands the scan to the
+    /// literal parser, whose end — the grapheme just past the closing
+    /// quote — is where the scan resumes. The interior words of a
+    /// literal are never visited, so no word or keyword span is ever
+    /// added inside one, and a literal's span wins the overlap of any
+    /// digit spans inside it. The same scan finds the comment: the
+    /// first `//` marker it meets in the plain graphemes — the slashes
+    /// of a character literal are skipped with the literal, so the
+    /// `//` of `'//'` is no marker — ends the scan, and no word,
+    /// character-literal, or lifetime span starts at or after the
+    /// marker.
     fn base_style(&self, line: &Line) -> LineStyle {
         let mut style = LineStyle::new();
         for span in line.number_spans() {
@@ -286,8 +327,21 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         let words = line.word_spans();
         let mut position = 0;
         let mut char_spans: Vec<Range<usize>> = Vec::new();
+        let mut comment_start: Option<usize> = None;
         for span in &words {
-            position = advance_past_literals(position, span.start, line, &mut style, &mut char_spans);
+            position = advance_past_literals(
+                position,
+                span.start,
+                line,
+                &mut style,
+                &mut char_spans,
+                &mut comment_start,
+            );
+            if comment_start.is_some() {
+                // The comment began in the gap before this word: every
+                // word, quote, and lifetime from here on sits in it.
+                break;
+            }
             if position > span.start {
                 // The word is inside a character literal: its opening
                 // quote claimed it, so it carries no style of its own.
@@ -300,8 +354,18 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
             position = span.end;
         }
         // A quote may open a literal in the plain tail after the last
-        // word too.
-        advance_past_literals(position, line.grapheme_count(), line, &mut style, &mut char_spans);
+        // word too — and so may a comment: the tail walk looks for
+        // both.
+        if comment_start.is_none() {
+            advance_past_literals(
+                position,
+                line.grapheme_count(),
+                line,
+                &mut style,
+                &mut char_spans,
+                &mut comment_start,
+            );
+        }
         // The lifetime spans are added after all the character spans,
         // and in line order, on purpose: a quote the character scan
         // left unpaired — an unclosed `'a` — still starts a lifetime
@@ -309,13 +373,26 @@ impl SyntaxHighlighter for RustSyntaxHighlighter {
         // literal is dropped instead: the literal's closing quote is
         // not the quote a lifetime opens, so a literal like `'a'` stays
         // fully a character, with no lifetime span added for the `'a`
-        // inside it. Where a lifetime span does overlap another span,
-        // the later span wins the overlap, as it does for the word
-        // styles.
+        // inside it. A lifetime whose quote sits in the comment is
+        // dropped too: the comment owns the rest of the line, and a
+        // lifetime run cannot straddle the marker, which opens with a
+        // slash — no run character. Where a lifetime span does overlap
+        // another span, the later span wins the overlap, as it does
+        // for the word styles.
         for span in line.lifetime_spans() {
-            if !char_spans.iter().any(|c| c.contains(&span.start)) {
+            let in_comment = comment_start.is_some_and(|start| span.start >= start);
+            if !in_comment && !char_spans.iter().any(|c| c.contains(&span.start)) {
                 style.add(span, Style::Lifetime);
             }
+        }
+        // The comment span is added last, after the digit, word,
+        // character, and lifetime spans, on purpose: a later span wins
+        // an overlap, so the comment color wins every grapheme from
+        // the marker to the end of the line, over the digit spans of
+        // any numbers the comment mentions — the same pattern as a
+        // type span winning the overlap of its inner digit spans.
+        if let Some(start) = comment_start {
+            style.add(start..line.grapheme_count(), Style::Comment);
         }
         style
     }
@@ -639,11 +716,205 @@ mod tests {
         let highlighter = RustSyntaxHighlighter;
         assert_eq!(highlighter.file_type(), FileType::Rust);
         // 42 is an integer, and 0x1f is one hexadecimal literal, not
-        // the integers 0 and 1; let is a keyword.
+        // the integers 0 and 1; let is a keyword. The // at the end of
+        // the line is a comment: it starts at the marker, runs to the
+        // end of the line, is added after the digit spans, and wins
+        // the overlap of the digit span of 0x1f.
         let line = Line::from("let x = 42; // 0x1f");
         assert_eq!(
             highlighter.base_style(&line).spans(),
-            &[(8..10, Style::Digit), (15..19, Style::Digit), (0..3, Style::Keyword)]
+            &[
+                (8..10, Style::Digit),
+                (15..19, Style::Digit),
+                (0..3, Style::Keyword),
+                (12..19, Style::Comment),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rust_highlighter_styles_a_comment_from_the_marker_to_the_end_of_the_line() {
+        let highlighter = RustSyntaxHighlighter;
+        // The marker is included, and the comment runs to the end of
+        // the line.
+        assert_eq!(
+            highlighter.base_style(&Line::from("//")).spans(),
+            &[(0..2, Style::Comment)]
+        );
+        let style = highlighter.base_style(&Line::from("x //"));
+        assert_eq!(style.spans(), &[(2..4, Style::Comment)]);
+        assert_eq!(style.at(0), Style::None, "the word before the marker stays plain");
+        assert_eq!(style.at(1), Style::None, "the space before the marker stays plain");
+        for i in 2..4 {
+            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        }
+        // A marker glued to the word before it: the word is plain, the
+        // comment starts at the marker.
+        assert_eq!(
+            highlighter.base_style(&Line::from("x//")).spans(),
+            &[(1..3, Style::Comment)]
+        );
+        // An indented comment starts at its marker, not at column zero.
+        assert_eq!(
+            highlighter.base_style(&Line::from("    // x")).spans(),
+            &[(4..8, Style::Comment)]
+        );
+    }
+
+    #[test]
+    fn a_comment_wins_the_overlap_of_the_digit_spans_inside_it() {
+        let highlighter = RustSyntaxHighlighter;
+        // 42 is a number run under the comment: the digit span is
+        // added in the first phase and the comment span last, so the
+        // comment color wins every grapheme of the line — the same
+        // pattern as a type span winning the overlap of its inner
+        // digit spans.
+        let line = Line::from("// let x = 42;");
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[(11..13, Style::Digit), (0..14, Style::Comment)]
+        );
+        for i in 0..14 {
+            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn the_comment_span_is_added_last_so_it_wins_the_overlaps() {
+        let highlighter = RustSyntaxHighlighter;
+        // The comment mentions a keyword, a type, and a number: the
+        // digit spans of 128 and 42 sit under the comment, and the
+        // comment span is the last span added to the line, so it wins
+        // every grapheme from the marker to the end of the line.
+        let line = Line::from("// let n: u128 = 42;");
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[
+                (11..14, Style::Digit),
+                (17..19, Style::Digit),
+                (0..20, Style::Comment),
+            ]
+        );
+        assert_eq!(
+            style.spans().last().map(|(_, s)| *s),
+            Some(Style::Comment),
+            "the comment span is the last span added"
+        );
+        for i in 0..20 {
+            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn a_single_slash_is_no_comment_and_a_division_line_keeps_its_digits() {
+        let highlighter = RustSyntaxHighlighter;
+        // A single slash — a division, say — starts no comment.
+        assert_eq!(
+            highlighter.base_style(&Line::from("1/2")).spans(),
+            &[(0..1, Style::Digit), (2..3, Style::Digit)]
+        );
+        // A division followed by a comment: the digits keep their
+        // spans under the comment, which starts at the marker.
+        let line = Line::from("1/2 // half");
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[(0..1, Style::Digit), (2..3, Style::Digit), (4..11, Style::Comment)]
+        );
+        assert_eq!(style.at(1), Style::None, "the division slash stays plain");
+        for i in 4..11 {
+            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_character_literal_is_no_comment() {
+        let highlighter = RustSyntaxHighlighter;
+        // The // of '//' sits inside the literal: the whole thing is
+        // one character, and the interior is never visited, so no
+        // comment starts there.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'//'")).spans(),
+            &[(0..4, Style::Char)]
+        );
+        // The same with a wider interior: the // is inside the
+        // literal, and the interior words are never visited.
+        assert_eq!(
+            highlighter.base_style(&Line::from("'a//b'")).spans(),
+            &[(0..6, Style::Char)]
+        );
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_string_starts_the_comment() {
+        let highlighter = RustSyntaxHighlighter;
+        // Documented naive behavior: strings are otherwise unstyled by
+        // the highlighter, so the // of "a//b" sits in plain graphemes
+        // and starts the comment; let is the only other span, and the
+        // word runs a and b never start a span — the comment swallows
+        // them.
+        let line = Line::from("let s = \"a//b\";");
+        let style = highlighter.base_style(&line);
+        assert_eq!(
+            style.spans(),
+            &[(0..3, Style::Keyword), (10..15, Style::Comment)]
+        );
+        for i in 10..15 {
+            assert_eq!(style.at(i), Style::Comment, "grapheme {i}");
+        }
+    }
+
+    #[test]
+    fn a_comment_swallows_the_lifetime_run_of_its_apostrophe() {
+        let highlighter = RustSyntaxHighlighter;
+        // Outside a comment, it's would pair the apostrophe into a
+        // lifetime run; inside the comment, the whole line is comment
+        // and the lifetime span is dropped instead.
+        assert_eq!(
+            highlighter.base_style(&Line::from("// it's")).spans(),
+            &[(0..7, Style::Comment)]
+        );
+    }
+
+    #[test]
+    fn doc_comments_are_ordinary_comments() {
+        let highlighter = RustSyntaxHighlighter;
+        // /// and //! carry no special treatment: the first // starts
+        // the comment, the marker included, to the end of the line.
+        assert_eq!(
+            highlighter.base_style(&Line::from("/// doc")).spans(),
+            &[(0..7, Style::Comment)]
+        );
+        assert_eq!(
+            highlighter.base_style(&Line::from("//! doc")).spans(),
+            &[(0..7, Style::Comment)]
+        );
+    }
+
+    #[test]
+    fn a_search_match_over_a_comment_wins_the_comment() {
+        let highlighter = RustSyntaxHighlighter;
+        let line = Line::from("// let x = 42;");
+        let mut style = highlighter.base_style(&line);
+        // The search layer is applied after the base styling, so a
+        // match over the comment wins it, as it wins every base style.
+        style.add(3..10, Style::Match);
+        assert_eq!(style.at(0), Style::Comment, "outside the match: the comment");
+        assert_eq!(style.at(3), Style::Match, "inside the match: the match wins");
+        assert_eq!(style.at(13), Style::Comment, "outside the match: the comment");
+    }
+
+    #[test]
+    fn the_plain_text_highlighter_does_not_style_comments() {
+        let highlighter = PlainTextSyntaxHighlighter;
+        let no_spans: &[(Range<usize>, Style)] = &[];
+        assert_eq!(
+            highlighter
+                .base_style(&Line::from("// 42 let 'a' 'static"))
+                .spans(),
+            no_spans
         );
     }
 
@@ -1022,6 +1293,70 @@ mod tests {
                 (1..5, Style::Keyword),
                 (0..5, Style::Lifetime),
             ],
+        ];
+        assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
+        for (line, want) in lines.iter().zip(expected.iter().copied()) {
+            assert_eq!(
+                highlighter.base_style(line).spans(),
+                want,
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rust_comments_fixture_is_highlighted_line_by_line() {
+        // The corpus under testdata/rust_comments.txt pins the
+        // single-line comment styling: the plain, indented, doc, and
+        // module doc comments, a comment carrying every other base
+        // style (a keyword, a type, a number, a char literal, a
+        // lifetime), code-then-comment lines, a single-slash
+        // non-comment, the '//' char-literal negative, a // inside a
+        // double-quoted string, an apostrophe in a comment, and a //
+        // at the very end of a line. The file is plain text, so the
+        // test drives the highlighter directly rather than going
+        // through the file type.
+        let lines: Vec<Line> =
+            fixture_content("rust_comments.txt").lines().map(Line::from).collect();
+        let highlighter = RustSyntaxHighlighter;
+        let expected: &[&[(Range<usize>, Style)]] = &[
+            &[(0..18, Style::Comment)],
+            &[(4..26, Style::Comment)],
+            &[(0..17, Style::Comment)],
+            &[(0..24, Style::Comment)],
+            // The comment mentions a keyword, a type, a number, a
+            // character literal, and a lifetime: none of them starts a
+            // span of its own, and the digit spans of 128 and 42 sit
+            // under the comment, which is added last and wins.
+            &[
+                (11..14, Style::Digit),
+                (17..19, Style::Digit),
+                (0..32, Style::Comment),
+            ],
+            // Code before the marker keeps its own spans: the digit
+            // and the keyword; from the marker to the end of the line
+            // is comment.
+            &[
+                (8..9, Style::Digit),
+                (0..3, Style::Keyword),
+                (11..30, Style::Comment),
+            ],
+            // A single slash is a division, not a comment: the line
+            // keeps only its digit and keyword spans.
+            &[(8..10, Style::Digit), (13..14, Style::Digit), (0..3, Style::Keyword)],
+            // The // of the literal sits inside it: the whole thing is
+            // one character, no comment.
+            &[(0..3, Style::Keyword), (8..12, Style::Char)],
+            // The // of the URL sits in a double-quoted string: the
+            // documented naive behavior, the string is otherwise
+            // unstyled, so the marker starts the comment.
+            &[(0..3, Style::Keyword), (16..24, Style::Comment)],
+            // The apostrophe's lifetime run sits in the comment: it
+            // is dropped, the whole line is comment.
+            &[(0..17, Style::Comment)],
+            // A // at the very end of the line: the marker alone is
+            // a comment.
+            &[(8..9, Style::Digit), (0..3, Style::Keyword), (11..13, Style::Comment)],
         ];
         assert_eq!(lines.len(), expected.len(), "the fixture's line count changed");
         for (line, want) in lines.iter().zip(expected.iter().copied()) {
