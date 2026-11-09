@@ -1,6 +1,6 @@
 use crate::common::constants::TAB_WIDTH_SPACES;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum GraphemeWidth {
     Half,
     Full,
@@ -23,7 +23,7 @@ impl GraphemeWidth {
 /// itself is not stored: it is the slice of the line's text from
 /// `byte_index` to the next fragment's `byte_index` (or the end of the
 /// text), so the text has a single copy.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TextFragment {
     /// The byte index of this grapheme's first byte within the line's text,
     /// as reported by `grapheme_indices`.

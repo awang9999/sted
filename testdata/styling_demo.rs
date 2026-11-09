@@ -10,6 +10,10 @@
 //   teal        lifetime specifiers ('static, '_, 'a_b2)
 //   dark green  comments          (// to the end of the line, marker
 //                                  included; nothing else colored in one)
+//                                  and /* ... */ spanning lines: a
+//                                  nested /* inside a /* counts as
+//                                  one comment; code resumes after
+//                                  the final */
 //
 // No non-comment colors below (see the last comment block).
 
@@ -95,6 +99,13 @@ fn measure() -> Result<u128, String> {
 
 fn comment_demo() -> u128 {
     let n: u128 = 42; // let 'a' 'static 42: keyword, char, lifetime, digit — all comment
+    n
+}
+
+fn block_comments() -> u128 {
+    /* a comment spanning three lines,
+       mentioning 42 and a keyword let,
+       and a nested /* inner */ comment */ let n: u128 = 7; // resumes here
     n
 }
 

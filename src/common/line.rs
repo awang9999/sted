@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 /// one entry per grapheme cluster, each carrying its byte index in `text`
 /// (as reported by `grapheme_indices`) so grapheme indices can be
 /// translated into byte positions without scanning the line.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Line {
     /// The raw text of the line, kept verbatim.
     text: String,
@@ -159,6 +159,30 @@ impl Line {
         let text = self.display_text_of(grapheme_index);
         let next = grapheme_index.saturating_add(1);
         text == "/"
+            && next < self.fragments.len()
+            && self.display_text_of(next) == "/"
+    }
+
+    /// Whether the grapheme at `grapheme_index` opens a multi-line
+    /// comment: the grapheme is a forward slash and the one after it is
+    /// an asterisk — the `/*` of a block comment. A multi-char cluster
+    /// like a keycap emoji is no slash, and an index at or past the
+    /// penultimate grapheme leaves no grapheme for the asterisk.
+    pub(crate) fn starts_ml_comment(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        let next = grapheme_index.saturating_add(1);
+        text == "/"
+            && next < self.fragments.len()
+            && self.display_text_of(next) == "*"
+    }
+
+    /// Whether the grapheme at `grapheme_index` closes a multi-line
+    /// comment: the grapheme is an asterisk and the one after it is a
+    /// forward slash — the `*/` of a block comment.
+    pub(crate) fn closes_ml_comment(&self, grapheme_index: usize) -> bool {
+        let text = self.display_text_of(grapheme_index);
+        let next = grapheme_index.saturating_add(1);
+        text == "*"
             && next < self.fragments.len()
             && self.display_text_of(next) == "/"
     }

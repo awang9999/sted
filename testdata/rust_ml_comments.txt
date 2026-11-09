@@ -1,0 +1,10 @@
+/* a */ let x = 42;
+/* a /* b */ c */ d = 42;
+let x = 1; /* a */ let y = 2;
+/* a // b */ x = 42;
+let x = 1; // /* not a comment
+/* still open at end of line
+x = 1; */ stray
+let s = '/*'; /* real */ let t = 2;
+/* 'a' */ let q = 'b';
+x = 42; /* open */ closed */ y = 7;
